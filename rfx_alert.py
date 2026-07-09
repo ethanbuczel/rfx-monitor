@@ -81,7 +81,13 @@ NASSAU_URL = "https://apex5.nassaucountyny.gov/ords/f?p=533:226"
 # MTA Construction & Development — current opportunities (static Drupal page; this
 # is where the real engineering/A-E work lives, vs the empty agency hubs). Each
 # biddable item has a "Solicitation Notice" PDF link. Set None to disable.
-MTA_URL = "https://www.mta.info/agency/construction-and-development/contracting/current-opportunities"
+MTA_URL = "https://new2.mta.info/agency/construction-and-development/contracting/current-opportunities"
+# NOTE: the www.mta.info version of this page 403s from cloud/datacenter IPs
+# (Akamai edge-level IP-reputation block — confirmed via GitHub Actions log,
+# not fixable with headers or browser rendering). This new2.mta.info mirror
+# turned up in a search with identical content; worth testing whether it sits
+# outside that same block. If it also 403s, revert to the www.mta.info URL
+# and run MTA locally instead (see README "hybrid" note).
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

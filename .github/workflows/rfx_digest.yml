@@ -31,7 +31,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RFX_RECIPIENT: ${{ secrets.RFX_RECIPIENT }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          LLM_MODE: tag
+          LLM_MODE: off
         run: py rfx_alert.py
 
       - name: Commit updated seen-file

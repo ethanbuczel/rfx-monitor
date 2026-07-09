@@ -2,31 +2,26 @@ name: RFx Daily Digest
 
 on:
   schedule:
-    # 11:00 UTC = 7:00 AM Eastern (EDT). During standard time (Nov-Mar)
-    # this fires at 6:00 AM ET; change to '0 12 * * *' if that bothers you.
+    # 11:00 UTC = 7:00 AM Eastern (EDT). Only fires if the self-hosted
+    # runner (your PC) is on and the runner service is running.
     - cron: '0 11 * * *'
-  workflow_dispatch:   # adds a manual "Run workflow" button (works from mobile app too)
+  workflow_dispatch:   # manual "Run workflow" button — works from mobile app
 
 permissions:
   contents: write      # needed to commit rfx_seen.json back
 
 jobs:
   digest:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted   # <-- runs on YOUR PC, not GitHub's cloud servers
     timeout-minutes: 30
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+          py -m pip install -r requirements.txt
+          py -m playwright install chromium
 
       - name: Run RFx digest
         env:
@@ -35,8 +30,8 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RFX_RECIPIENT: ${{ secrets.RFX_RECIPIENT }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          LLM_MODE: tag   # switch to 'drop' once you trust its judgment
-        run: python rfx_alert.py
+          LLM_MODE: tag
+        run: py rfx_alert.py
 
       - name: Commit updated seen-file
         run: |

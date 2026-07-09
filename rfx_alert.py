@@ -88,13 +88,14 @@ MTA_URL = "https://www.mta.info/agency/construction-and-development/contracting/
 # domain) so that's not a workaround either. Works fine from a home/
 # residential IP — see README for the hybrid-run option.
 
-HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
-    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
-               "image/avif,image/webp,*/*;q=0.8"),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RFxMonitor/1.0"}
+# NOTE: this is deliberately NOT spoofed to look like real Chrome. An earlier
+# attempt to fix MTA's 403 by claiming a real Chrome UA (plus Accept/
+# Accept-Language headers) may have made things worse — Python's requests
+# library has a TLS/connection fingerprint that doesn't match real Chrome at
+# all, so claiming to BE Chrome while not behaving like it is a classic bot-
+# detection trigger. This honest, plainly-labeled UA is what MTA originally
+# accepted, before any of that troubleshooting started.
 
 
 def _mdy_dates(text: str) -> list:

@@ -528,6 +528,13 @@ def fetch_mta() -> list[dict]:
                           due=due or "Unknown"))
 
     print(f"[MTA] {len(out)} solicitations")
+    if not out:
+        # Nothing parsed — print a peek at what actually rendered, so a bot
+        # challenge / consent wall / empty shell shows up instead of silence.
+        preview = re.sub(r"\s+", " ", page_text).strip()[:300]
+        print(f"[MTA] diag: page_text length={len(page_text)} chars, "
+              f"title-block count={len(idxs)}")
+        print(f"[MTA] diag: first 300 chars -> {preview!r}")
     return out
 
 

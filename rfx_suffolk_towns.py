@@ -33,6 +33,7 @@ Usage:
 """
 
 import asyncio
+import re
 import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
@@ -237,15 +238,35 @@ async def scrape_southampton(pw, diag: bool = False) -> list[dict]:
             rows = await page.query_selector_all("tr")
 
         for row in rows:
-            text = (await row.inner_text()).strip()
-            if not text or len(text) < 8:
+            full_text = (await row.inner_text()).strip()
+            if not full_text or len(full_text) < 8:
                 continue
+            # Skip closed/awarded bids — the table lists bid history, not just
+            # open opportunities, and a bid's DEPARTMENT column (e.g. "Highway
+            # Department") was matching keywords even for unrelated bulkhead/
+            # building jobs. So: match on the TITLE cell only, and skip if the
+            # row shows a closed/awarded status anywhere.
+            if re.search(r"awarded|closed to bidding|cancel(?:l)?ed", full_text, re.I):
+                continue
+
             link_el = await row.query_selector("a")
             href = (await link_el.get_attribute("href")) if link_el else ""
             if href and not href.startswith("http"):
                 href = "https://southampton.procureware.com" + href
-            if matches(text):
-                title = text.split("\n")[0][:160]
+
+            cells = await row.query_selector_all("td")
+            # First cell is usually the bid number (the link); title is
+            # typically the next non-empty cell.
+            title = ""
+            for cell in cells[1:4]:
+                t = (await cell.inner_text()).strip()
+                if t and not re.match(r"^BP\d", t):
+                    title = t
+                    break
+            if not title:
+                title = full_text.split("\n")[0][:160]
+
+            if matches(title):
                 out.append(result(SOURCE, "Town of Southampton", title,
                                   href or "https://southampton.procureware.com/bids"))
 

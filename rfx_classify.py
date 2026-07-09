@@ -59,6 +59,9 @@ SHARED_LISTING_URLS = (
     "bidsapp.townofbabylon.com/Bid?statusId=2",
     "southampton.procureware.com/bids",
     "passport.cityofnewyork.us",   # public board, not per-solicitation
+    "bidnetdirect.com",            # bot-blocks fetches AND locks description
+                                   # behind login — returns a useless shell, so
+                                   # judge from the (clean) title instead
 )
 
 
@@ -106,11 +109,15 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str]:
     else:
         context += (
             "Detail page: COULD NOT BE FETCHED. You have ONLY the title above. "
-            "Do NOT invent or assume specific scope details you cannot see "
-            "(e.g. do not claim it's 'interior' or 'station' work if the title "
-            "doesn't say so). Judge only from what the title actually states, "
-            "and when the title is a general transportation/transit/roadway/"
-            "bridge term, lean RELEVANT.\n")
+            "Do NOT invent or assume specific scope details you cannot see. In "
+            "particular, do NOT infer 'interior' or 'building' scope just "
+            "because a place name (e.g. 'Town Hall', 'Station', 'Courthouse') "
+            "appears — an 'ADA Ramp' or 'sidewalk' at such a location is often "
+            "PEDESTRIAN/roadway work, which IS relevant. Judge only from what "
+            "the title actually states, and when it names a transportation, "
+            "roadway, pedestrian/ADA-ramp, bridge, or traffic term, lean "
+            "RELEVANT. If the title is truly too vague to tell, answer "
+            "'unknown'.\n")
 
     prompt = (
         "You screen government procurement opportunities for a TRAFFIC "

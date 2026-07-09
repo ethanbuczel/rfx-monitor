@@ -50,11 +50,27 @@ MAX_TEXT_CHARS = 4000      # how much fetched text to send the LLM
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RFxMonitor/1.0"}
 
 
+# URLs that are SHARED listing pages, not per-item detail pages. Fetching these
+# returns the whole board (all opportunities mixed together), which pollutes the
+# classification of any single item with scope language from its neighbors. For
+# these, we skip the fetch and judge from the (clean) title alone.
+SHARED_LISTING_URLS = (
+    "mta.info/agency/construction-and-development/contracting/current-opportunities",
+    "bidsapp.townofbabylon.com/Bid?statusId=2",
+    "southampton.procureware.com/bids",
+    "passport.cityofnewyork.us",   # public board, not per-solicitation
+)
+
+
 def _fetch_detail_text(url: str) -> str:
     """Best-effort fetch of an opportunity's detail page. Returns plain text,
     or "" on any failure. PDFs and JS-heavy portals will often yield little —
     that's fine, the classifier falls back to the title."""
     if not url or not url.startswith("http"):
+        return ""
+    # Don't fetch shared listing pages — they return every opportunity at once,
+    # which would contaminate this item's classification with others' scope.
+    if any(s in url for s in SHARED_LISTING_URLS):
         return ""
     try:
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT_FETCH)

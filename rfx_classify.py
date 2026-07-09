@@ -90,24 +90,31 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str]:
         context += "Detail page: (could not fetch — judge from title)\n"
 
     prompt = (
-        "You classify government procurement opportunities for a TRAFFIC/CIVIL "
-        "ENGINEERING CONSULTING firm. The firm does DESIGN and engineering "
-        "services (studies, design, plans, inspection, construction support/"
-        "management, professional engineering). It does NOT self-perform "
-        "CONSTRUCTION — it is not a contractor that builds, paves, installs, or "
-        "supplies materials.\n\n"
-        "Decide whether this opportunity is:\n"
-        "- \"design\": engineering/design/study/inspection/CM/professional "
-        "services — a fit for the firm.\n"
-        "- \"construction\": physical construction, paving, installation, "
-        "materials supply, equipment, a contractor bid — usually NOT a fit.\n"
-        "- \"unknown\": genuinely can't tell.\n\n"
-        "Note: design-build solicitations usually seek a contractor-led team; "
-        "call those \"construction\" unless the text clearly seeks the design/"
-        "engineering role.\n\n"
+        "You screen government procurement opportunities for a TRAFFIC "
+        "ENGINEERING consulting firm. Decide whether the opportunity is a "
+        "POTENTIAL CONTRACT for them.\n\n"
+        "The test is deliberately BROAD: mark it a potential contract if there "
+        "is ANY traffic or transportation scope that a traffic engineer could "
+        "plausibly perform DESIGN work on — even if the opportunity is larger "
+        "than just that, or is construction-flavored, as long as traffic-"
+        "engineering design could be part of it.\n\n"
+        "RELEVANT (potential contract) examples: traffic signals and "
+        "signalization, signing and pavement markings, maintenance and "
+        "protection of traffic (MOT/MPT/WZTC), traffic studies and safety "
+        "studies, corridor/intersection design, ITS, pedestrian/bicycle/"
+        "complete-streets design, roadway design, transportation planning, "
+        "and larger road/highway/bridge or design-build packages that would "
+        "include a traffic-engineering design component.\n\n"
+        "NOT RELEVANT examples (no traffic-engineering design scope): building "
+        "renovations, HVAC/roofing/painting, water/sewer mains and treatment, "
+        "material or equipment supply, vehicles, IT/software, janitorial or "
+        "security services, landscaping-only, concessions and leases, "
+        "appraisals and financial services.\n\n"
+        "When in doubt, lean RELEVANT — it is better to surface a maybe than "
+        "hide a real one.\n\n"
         f"{context}\n"
         "Respond with ONLY a compact JSON object, no other text:\n"
-        '{"v": "design"|"construction"|"unknown", "r": "<reason, max 10 words>"}'
+        '{"v": "relevant"|"not_relevant"|"unknown", "r": "<reason, max 10 words>"}'
     )
     try:
         resp = requests.post(
@@ -125,7 +132,7 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str]:
         import json
         v = json.loads(content)
         verdict = str(v.get("v", "unknown")).lower()
-        if verdict not in ("design", "construction", "unknown"):
+        if verdict not in ("relevant", "not_relevant", "unknown"):
             verdict = "unknown"
         return verdict, str(v.get("r", ""))[:80]
     except Exception:
@@ -160,22 +167,22 @@ def classify_results(results: list[dict]) -> list[dict]:
         print(f"[classify] batch failed ({e}) — leaving items unannotated.")
         return results
 
-    n_constr = n_design = 0
+    n_notrel = n_rel = 0
     for idx, (verdict, reason) in verdicts.items():
-        if verdict == "construction":
-            note = "⚠ Likely CONSTRUCTION (not design)"
+        if verdict == "not_relevant":
+            note = "Not relevant design work"
             if reason:
                 note += f" — {reason}"
-            n_constr += 1
-        elif verdict == "design":
-            note = "✓ Likely design/engineering"
-            n_design += 1
+            n_notrel += 1
+        elif verdict == "relevant":
+            note = "✓ Potential contract"
+            n_rel += 1
         else:
             continue  # unknown -> no note
         extra = results[idx].get("extra") or ""
         results[idx]["extra"] = f"{note} | {extra}" if extra else note
 
-    print(f"[classify] tagged {n_constr} likely-construction, "
-          f"{n_design} likely-design, "
-          f"{len(results) - n_constr - n_design} unmarked, of {len(results)}.")
+    print(f"[classify] tagged {n_rel} potential-contract, "
+          f"{n_notrel} not-relevant, "
+          f"{len(results) - n_rel - n_notrel} unmarked, of {len(results)}.")
     return results

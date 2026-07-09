@@ -21,7 +21,6 @@ import os
 import re
 import sys
 import json
-import asyncio
 import smtplib
 import datetime as dt
 from email.mime.text import MIMEText
@@ -468,52 +467,40 @@ def fetch_nassau() -> list[dict]:
 
 
 # ─── MTA Construction & Development ───────────────────────────────────────────
-async def _fetch_mta_page_text() -> str:
-    """Render the MTA C&D page with headless Chromium and return its text.
-    Plain requests gets a 403 here even with full browser headers — this page
-    is blocked at the IP-reputation level for datacenter ranges (confirmed via
-    GitHub Actions logs), not by header fingerprinting. A real browser context
-    via Playwright clears it, same as it already does for Bonfire/PASSPort."""
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as pw:
-        # --disable-blink-features=AutomationControlled hides the most common
-        # headless-browser fingerprint Akamai's bot detection checks for. The
-        # Bonfire/PASSPort scrapers already use this and get through; the
-        # first version of this function didn't, which is the likely reason
-        # it was denied even from a home IP (residential IP ruled out the
-        # datacenter-block theory — this looks like fingerprint detection,
-        # not IP reputation).
-        browser = await pw.chromium.launch(
-            headless=True, args=["--disable-blink-features=AutomationControlled"])
-        ctx = await browser.new_context(user_agent=HEADERS["User-Agent"])
-        page = await ctx.new_page()
-        try:
-            await page.goto(MTA_URL, timeout=45000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(1500)
-            text = await page.inner_text("body")
-        finally:
-            await browser.close()
-    return text
-
-
 def fetch_mta() -> list[dict]:
+    """Plain requests — this is the ORIGINAL approach, and it worked fine
+    locally before any of this. The Akamai 403 only ever showed up from
+    GitHub's cloud (Azure datacenter IP) runs. Once running on the
+    self-hosted runner (your home IP), there's no reason this shouldn't
+    work exactly like it always did — and a plain requests call has a much
+    less distinctive network fingerprint than an automated Chromium browser,
+    which is a more plausible thing for Akamai's bot detection to flag than
+    a boring HTTP client. If this DOES get denied again from the self-hosted
+    runner, that would mean Akamai is blocking on something requests can't
+    fix either way, at which point Playwright wasn't the answer regardless."""
     if not MTA_URL:
         return []
-
     try:
-        page_text = asyncio.run(_fetch_mta_page_text())
+        r = requests.get(MTA_URL, headers=HEADERS, timeout=40)
+        r.raise_for_status()
     except Exception as e:
         print(f"[MTA] error: {e}")
         return []
 
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        print("[MTA] beautifulsoup4 not installed — skipping.")
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
     today = dt.date.today()
     out, seen = [], set()
 
     # Every block has a "Title/description:" field and a "Current opening/due
     # date:" field. Slice the page text block-by-block off those labels (bounded
     # by the next Title label) — robust against the nested link markup.
-    lines = [ln.strip() for ln in page_text.split("\n")]
+    lines = [ln.strip() for ln in soup.get_text("\n").split("\n")]
     title_pat = re.compile(r"(?i)^title\s*/\s*desc(?:ription)?\s*:\s*(.*)$")
     idxs = [k for k, l in enumerate(lines) if title_pat.match(l)]
     for n, i in enumerate(idxs):
@@ -543,10 +530,8 @@ def fetch_mta() -> list[dict]:
 
     print(f"[MTA] {len(out)} solicitations")
     if not out:
-        # Nothing parsed — print a peek at what actually rendered, so a bot
-        # challenge / consent wall / empty shell shows up instead of silence.
-        preview = re.sub(r"\s+", " ", page_text).strip()[:300]
-        print(f"[MTA] diag: page_text length={len(page_text)} chars, "
+        preview = re.sub(r"\s+", " ", r.text).strip()[:300]
+        print(f"[MTA] diag: response length={len(r.text)} chars, "
               f"title-block count={len(idxs)}")
         print(f"[MTA] diag: first 300 chars -> {preview!r}")
     return out

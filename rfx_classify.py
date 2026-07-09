@@ -208,20 +208,24 @@ def classify_results(results: list[dict]) -> list[dict]:
 
     n_notrel = n_rel = 0
     for idx, (verdict, reason, had_detail) in verdicts.items():
+        item = results[idx]
         if verdict == "not_relevant":
-            note = "Not relevant design work"
-            if reason:
-                note += f" — {reason}"
+            item["relevance"] = "not_relevant"
+            item["relevance_reason"] = reason or ""
             n_notrel += 1
         elif verdict == "relevant":
-            note = "✓ Potential contract"
+            item["relevance"] = "relevant"
+            item["relevance_reason"] = ""
             n_rel += 1
         else:
-            continue  # unknown -> no note
-        if not had_detail:
-            note += " (title only — detail page unavailable)"
-        extra = results[idx].get("extra") or ""
-        results[idx]["extra"] = f"{note} | {extra}" if extra else note
+            item["relevance"] = "unknown"
+            item["relevance_reason"] = ""
+            continue
+        item["relevance_title_only"] = not had_detail
+
+    # Any item the classifier didn't return a verdict for -> unknown
+    for it in results:
+        it.setdefault("relevance", "unknown")
 
     print(f"[classify] tagged {n_rel} potential-contract, "
           f"{n_notrel} not-relevant, "

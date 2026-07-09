@@ -558,6 +558,27 @@ def build_html(results: list[dict]) -> str:
              "font-weight:bold;padding:1px 5px;border-radius:3px;"
              "margin-right:6px;'>NEW</span>")
 
+    # Colored status dot + label for the design-relevance classifier verdict.
+    def status_tag(it: dict) -> str:
+        rel = it.get("relevance")
+        if rel == "relevant":
+            color, label = "#2f9e44", "Potential contract"      # green
+        elif rel == "not_relevant":
+            color, label = "#e03131", "Unrelated"               # red
+        elif rel == "unknown":
+            color, label = "#f08c00", "Unknown"                 # yellow/amber
+        else:
+            return ""  # classifier didn't run at all
+        reason = it.get("relevance_reason") or ""
+        if it.get("relevance_title_only"):
+            reason = (reason + " (title only)").strip() if reason else "title only"
+        reason_html = f" <span style='color:#868e96'>— {reason}</span>" if reason else ""
+        dot = (f"<span style='display:inline-block;width:9px;height:9px;"
+               f"border-radius:50%;background:{color};margin-right:5px;"
+               f"vertical-align:middle;'></span>")
+        return (f"<div style='margin-top:2px;font-size:12px;'>{dot}"
+                f"<b style='color:{color}'>{label}</b>{reason_html}</div>")
+
     for source, items in sorted(by_source.items()):
         # New items first, then the rest, each group keeping its order.
         items.sort(key=lambda x: not x.get("is_new"))
@@ -575,7 +596,8 @@ def build_html(results: list[dict]) -> str:
             tag = badge if it.get("is_new") else ""
             style = (" style='background:#fff4e6;padding:2px 4px;'"
                      if it.get("is_new") else "")
-            parts.append(f"<li{style}>{tag}{link}<br><small>{meta}</small></li>")
+            parts.append(f"<li{style}>{tag}{link}<br><small>{meta}</small>"
+                         f"{status_tag(it)}</li>")
         parts.append("</ul>")
     return "\n".join(parts)
 

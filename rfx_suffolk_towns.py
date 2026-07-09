@@ -71,8 +71,19 @@ def scrape_brookhaven() -> list[dict]:
                 continue
             if matches(title):
                 row_text = row.get_text(" ", strip=True)
+                # BidNet rows include the closing date in the row text, e.g.
+                # "...Closing 07/14/2026" — pull it into the due field so the
+                # digest doesn't show "Unknown". Accept a couple date formats.
+                due = "Unknown"
+                dm = re.search(
+                    r"clos\w*(?:\s+date)?\s*[:\-]?\s*"
+                    r"(\d{1,2}/\d{1,2}/\d{2,4}"
+                    r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s+\d{4})",
+                    row_text, re.I)
+                if dm:
+                    due = dm.group(1)
                 out.append(result(SOURCE, "Town of Brookhaven", title, href,
-                                  extra=row_text[:120]))
+                                  due=due, extra=row_text[:120]))
     except Exception as e:
         print(f"[Brookhaven] Error: {e}")
     return out

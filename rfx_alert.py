@@ -477,7 +477,15 @@ async def _fetch_mta_page_text() -> str:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        # --disable-blink-features=AutomationControlled hides the most common
+        # headless-browser fingerprint Akamai's bot detection checks for. The
+        # Bonfire/PASSPort scrapers already use this and get through; the
+        # first version of this function didn't, which is the likely reason
+        # it was denied even from a home IP (residential IP ruled out the
+        # datacenter-block theory — this looks like fingerprint detection,
+        # not IP reputation).
+        browser = await pw.chromium.launch(
+            headless=True, args=["--disable-blink-features=AutomationControlled"])
         ctx = await browser.new_context(user_agent=HEADERS["User-Agent"])
         page = await ctx.new_page()
         try:

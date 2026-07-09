@@ -82,12 +82,19 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str]:
     ("unknown", "") on any problem, so the caller can fail open."""
     title = item.get("title", "")
     detail = _fetch_detail_text(item.get("url", ""))
+    had_detail = bool(detail)
     source_hint = f"[{item.get('source','')} / {item.get('agency','')}]"
     context = f"Title: {title}\nSource: {source_hint}\n"
     if detail:
         context += f"Detail page excerpt: {detail}\n"
     else:
-        context += "Detail page: (could not fetch — judge from title)\n"
+        context += (
+            "Detail page: COULD NOT BE FETCHED. You have ONLY the title above. "
+            "Do NOT invent or assume specific scope details you cannot see "
+            "(e.g. do not claim it's 'interior' or 'station' work if the title "
+            "doesn't say so). Judge only from what the title actually states, "
+            "and when the title is a general transportation/transit/roadway/"
+            "bridge term, lean RELEVANT.\n")
 
     prompt = (
         "You screen government procurement opportunities for a TRAFFIC "
@@ -150,9 +157,9 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str]:
         verdict = str(v.get("v", "unknown")).lower()
         if verdict not in ("relevant", "not_relevant", "unknown"):
             verdict = "unknown"
-        return verdict, str(v.get("r", ""))[:80]
+        return verdict, str(v.get("r", ""))[:80], had_detail
     except Exception:
-        return "unknown", ""
+        return "unknown", "", had_detail
 
 
 def classify_results(results: list[dict]) -> list[dict]:
@@ -178,13 +185,13 @@ def classify_results(results: list[dict]) -> list[dict]:
                 try:
                     verdicts[idx] = fut.result()
                 except Exception:
-                    verdicts[idx] = ("unknown", "")
+                    verdicts[idx] = ("unknown", "", False)
     except Exception as e:
         print(f"[classify] batch failed ({e}) — leaving items unannotated.")
         return results
 
     n_notrel = n_rel = 0
-    for idx, (verdict, reason) in verdicts.items():
+    for idx, (verdict, reason, had_detail) in verdicts.items():
         if verdict == "not_relevant":
             note = "Not relevant design work"
             if reason:
@@ -195,6 +202,8 @@ def classify_results(results: list[dict]) -> list[dict]:
             n_rel += 1
         else:
             continue  # unknown -> no note
+        if not had_detail:
+            note += " (title only — detail page unavailable)"
         extra = results[idx].get("extra") or ""
         results[idx]["extra"] = f"{note} | {extra}" if extra else note
 

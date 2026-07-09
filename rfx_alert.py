@@ -576,8 +576,10 @@ def build_html(results: list[dict]) -> str:
         dot = (f"<span style='display:inline-block;width:9px;height:9px;"
                f"border-radius:50%;background:{color};margin-right:5px;"
                f"vertical-align:middle;'></span>")
-        return (f"<div style='margin-top:2px;font-size:12px;'>{dot}"
-                f"<b style='color:{color}'>{label}</b>{reason_html}</div>")
+        # Inline (no wrapping div) so it sits tight under the meta line — Outlook
+        # adds big margins around block elements, which pushed it too far down.
+        return (f"<br><span style='font-size:12px;'>{dot}"
+                f"<b style='color:{color}'>{label}</b>{reason_html}</span>")
 
     for source, items in sorted(by_source.items()):
         # New items first, then the rest, each group keeping its order.
@@ -596,8 +598,8 @@ def build_html(results: list[dict]) -> str:
             tag = badge if it.get("is_new") else ""
             style = (" style='background:#fff4e6;padding:2px 4px;'"
                      if it.get("is_new") else "")
-            parts.append(f"<li{style}>{tag}{link}<br><small>{meta}</small>"
-                         f"{status_tag(it)}</li>")
+            parts.append(f"<li{style}>{tag}{link}<br><small>{meta}"
+                         f"{status_tag(it)}</small></li>")
         parts.append("</ul>")
     return "\n".join(parts)
 

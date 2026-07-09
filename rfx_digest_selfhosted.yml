@@ -1,0 +1,49 @@
+name: RFx Daily Digest
+
+on:
+  schedule:
+    # 11:00 UTC = 7:00 AM Eastern (EDT). Only fires if the self-hosted
+    # runner (your PC) is on and the runner is listening (run.cmd running
+    # or the auto-start Task Scheduler entry has kicked it off).
+    - cron: '0 11 * * *'
+  workflow_dispatch:   # manual "Run workflow" button — works from mobile app
+
+permissions:
+  contents: write      # needed to commit rfx_seen.json back
+
+jobs:
+  digest:
+    runs-on: self-hosted   # <-- runs on YOUR PC, not GitHub's cloud servers
+    timeout-minutes: 30
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          py -m pip install -r requirements.txt
+          py -m playwright install chromium
+
+      - name: Run RFx digest
+        env:
+          SAM_API_KEY: ${{ secrets.SAM_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RFX_RECIPIENT: ${{ secrets.RFX_RECIPIENT }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_MODE: tag
+        run: py rfx_alert.py
+
+      - name: Commit updated seen-file
+        # Self-hosted Windows runners default to legacy Windows PowerShell,
+        # which doesn't support bash-style "||". Rewritten with PowerShell's
+        # own $LASTEXITCODE check instead.
+        run: |
+          git config user.name "rfx-bot"
+          git config user.email "actions@github.com"
+          git add rfx_seen.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Update rfx_seen.json [skip ci]"
+          }
+          git push

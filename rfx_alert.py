@@ -682,6 +682,15 @@ def main() -> None:
     except Exception as e:
         print(f"[llm] module error (continuing without it): {e}")
 
+    # Optional design-vs-construction classifier (OpenRouter). Fetches each
+    # opportunity's detail page and tags likely-construction bids with a note
+    # (never removes them). Fails open — any error leaves items unannotated.
+    try:
+        from rfx_classify import classify_results
+        deduped = classify_results(deduped)
+    except Exception as e:
+        print(f"[classify] module error (continuing without it): {e}")
+
     send_email(build_html(deduped), len(deduped))
 
 

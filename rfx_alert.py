@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import json
+import asyncio
 import smtplib
 import datetime as dt
 from email.mime.text import MIMEText
@@ -461,29 +462,44 @@ def fetch_nassau() -> list[dict]:
 
 
 # ─── MTA Construction & Development ───────────────────────────────────────────
+async def _fetch_mta_page_text() -> str:
+    """Render the MTA C&D page with headless Chromium and return its text.
+    Plain requests gets a 403 here even with full browser headers — this page
+    is blocked at the IP-reputation level for datacenter ranges (confirmed via
+    GitHub Actions logs), not by header fingerprinting. A real browser context
+    via Playwright clears it, same as it already does for Bonfire/PASSPort."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        ctx = await browser.new_context(user_agent=HEADERS["User-Agent"])
+        page = await ctx.new_page()
+        try:
+            await page.goto(MTA_URL, timeout=45000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(1500)
+            text = await page.inner_text("body")
+        finally:
+            await browser.close()
+    return text
+
+
 def fetch_mta() -> list[dict]:
     if not MTA_URL:
         return []
+
     try:
-        from bs4 import BeautifulSoup
-    except ImportError:
-        print("[MTA] beautifulsoup4 not installed — skipping.")
-        return []
-    try:
-        r = requests.get(MTA_URL, headers=HEADERS, timeout=40)
-        r.raise_for_status()
+        page_text = asyncio.run(_fetch_mta_page_text())
     except Exception as e:
         print(f"[MTA] error: {e}")
         return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
     today = dt.date.today()
     out, seen = [], set()
 
     # Every block has a "Title/description:" field and a "Current opening/due
     # date:" field. Slice the page text block-by-block off those labels (bounded
     # by the next Title label) — robust against the nested link markup.
-    lines = [ln.strip() for ln in soup.get_text("\n").split("\n")]
+    lines = [ln.strip() for ln in page_text.split("\n")]
     title_pat = re.compile(r"(?i)^title\s*/\s*desc(?:ription)?\s*:\s*(.*)$")
     idxs = [k for k, l in enumerate(lines) if title_pat.match(l)]
     for n, i in enumerate(idxs):

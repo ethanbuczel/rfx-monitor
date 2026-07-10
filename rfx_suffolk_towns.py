@@ -16,7 +16,9 @@ East End towns:
   - Town of Southampton    (ProcureWare portal — JS-rendered, Playwright)
 
 NOT covered:
-  - Town of Islip — requires account login to view bid list at all
+  - Town of Islip — login-only portal (bids.islipny.gov); the old public
+    site (bids.townofislip-ny.gov) is a dead domain (DNS does not resolve).
+    If Islip matters: register a free vendor account there for email alerts.
 
 Filtering: uses the SHARED keyword filter from rfx_common (same as MTA,
 NYSDOT, etc.), so tuning the keyword list in one place covers the towns too.
@@ -146,6 +148,7 @@ CIVICENGAGE_TOWNS = [
     ("Town of East Hampton",   "https://ehamptonny.gov/Bids.aspx"),
     ("Town of Southold",       "https://www.southoldtownny.gov/Bids.aspx"),
     ("Town of Shelter Island", "https://www.shelterislandtown.gov/Bids.aspx"),
+    ("Town of Hempstead",      "https://hempsteadny.gov/Bids.aspx"),
 ]
 
 
@@ -183,6 +186,224 @@ def scrape_civicengage_all() -> list[dict]:
     out = []
     for name, url in CIVICENGAGE_TOWNS:
         out += scrape_civicengage_town(name, url)
+    return out
+
+
+# ─── Town of Oyster Bay (WordPress "Doing Business" page, static) ─────────────
+# The page carries two HTML tables: "Available Bids" (bid no. -> PDF link,
+# description, due/opening date) and "RFPs for Professional Services".
+
+def scrape_oyster_bay() -> list[dict]:
+    out = []
+    url = "https://oysterbaytown.com/doing-business-with-the-town/"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        import datetime as _dt
+        today = _dt.date.today()
+        date_pat = re.compile(r"([A-Z][a-z]{2,8})\s+(\d{1,2}),?\s+(\d{4})")
+
+        for row in soup.find_all("tr"):
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                continue
+            texts = [c.get_text(" ", strip=True) for c in cells]
+            link = row.find("a", href=True)
+            href = link["href"] if link else url
+            if href.startswith("/"):
+                href = "https://oysterbaytown.com" + href
+
+            # Bids table: [bid_no, description, due/opening] — RFP table:
+            # [rfp title, department, release, due]. Due date is the LAST
+            # date in the row; title is the longest descriptive cell.
+            full = " ".join(texts)
+            dm = date_pat.findall(full)
+            due = f"{dm[-1][0]} {dm[-1][1]}, {dm[-1][2]}" if dm else ""
+            # Skip rows whose due date already passed
+            if due:
+                try:
+                    d = _dt.datetime.strptime(due, "%B %d, %Y").date()
+                    if d < today:
+                        continue
+                except ValueError:
+                    pass
+            title = max(texts, key=len).strip()
+            title = date_pat.sub("", title).strip(" -–·")
+            if not title or len(title) < 8:
+                continue
+            bid_no = texts[0][:40] if texts[0] != title else ""
+            if matches(title):
+                out.append(result(SOURCE, "Town of Oyster Bay", title, href,
+                                  due=due or "Unknown", extra=bid_no))
+    except Exception as e:
+        print(f"[Oyster Bay] Error: {e}")
+    return out
+
+
+# ─── Town of Islip (login portal, Playwright + stored credentials) ────────────
+# bids.islipny.gov requires a (free) vendor account even to VIEW the bid list.
+# Register at https://bids.islipny.gov -> Create an Account, then provide the
+# credentials via environment variables (locally with setx, on GitHub as
+# repository secrets — never in code):
+#   ISLIP_EMAIL     your registered email
+#   ISLIP_PASSWORD  your portal password
+# If the credentials are absent, this source skips itself silently.
+# Post-login page structure is a first pass — run with DIAG=1 if it returns 0
+# to dump what the logged-in page actually shows.
+
+async def scrape_islip(pw, diag: bool = False) -> list[dict]:
+    import os as _os
+    email = _os.environ.get("ISLIP_EMAIL", "")
+    password = _os.environ.get("ISLIP_PASSWORD", "")
+    if not email or not password:
+        print("[Islip] ISLIP_EMAIL/ISLIP_PASSWORD not set — skipping.")
+        return []
+
+    out = []
+    browser = await pw.chromium.launch(headless=True)
+    ctx = await browser.new_context(user_agent=HEADERS["User-Agent"])
+    page = await ctx.new_page()
+    try:
+        await page.goto("https://bids.islipny.gov/", timeout=35000,
+                        wait_until="domcontentloaded")
+        await page.wait_for_timeout(1500)
+
+        # Log in (AJAX auth -> authenticateAPI.php sets a session cookie).
+        email_box = await page.query_selector("input[type='email']")
+        pass_box = await page.query_selector("input[type='password']")
+        if not (email_box and pass_box):
+            print("[Islip] login form not found — skipping.")
+            return []
+
+        auth_ok = {"v": False}
+
+        async def _on_response(resp):
+            if "authenticate" in resp.url.lower():
+                try:
+                    import json as _json
+                    data = _json.loads(await resp.text())
+                    auth_ok["v"] = str(data.get("status")) == "1"
+                except Exception:
+                    pass
+        page.on("response", lambda r: asyncio.create_task(_on_response(r)))
+
+        await email_box.click()
+        await email_box.type(email, delay=25)
+        await pass_box.click()
+        await pass_box.type(password, delay=25)
+        btn = await page.query_selector("button[type='submit'], "
+                                        "button:has-text('Login')")
+        if btn:
+            await btn.click()
+        else:
+            await pass_box.press("Enter")
+        await page.wait_for_timeout(3500)
+
+        if not auth_ok["v"]:
+            print("[Islip] login failed — check ISLIP_EMAIL/ISLIP_PASSWORD.")
+            return []
+
+        # After login, the Bids and RFP/RFQ tabs load bidView links.
+        # ?page=main&type=bids and &type=rfp are the two listings.
+        seen_ids = set()
+        for list_url in ("https://bids.islipny.gov/?page=main&type=bids",
+                         "https://bids.islipny.gov/?page=main&type=rfp"):
+            try:
+                await page.goto(list_url, timeout=25000,
+                                wait_until="domcontentloaded")
+                await page.wait_for_timeout(2500)
+            except Exception:
+                continue
+
+            for link in await page.query_selector_all("a[href*='bidView']"):
+                text = (await link.inner_text()).strip()
+                href = await link.get_attribute("href") or ""
+                m = re.search(r"id=(\d+)", href)
+                bid_id = m.group(1) if m else href
+                if bid_id in seen_ids:
+                    continue
+                if not href.startswith("http"):
+                    href = "https://bids.islipny.gov/" + href.lstrip("/")
+                # First line of the link text is the bid title; the rest is
+                # posted/closes dates and description.
+                title = text.split("\n")[0].strip()
+                # Pull the closing date if present.
+                dm = re.search(r"closes?:\s*(\d{1,2}/\d{1,2}/\d{2,4})",
+                               text, re.I)
+                due = dm.group(1) if dm else "Unknown"
+                if title and matches(text):
+                    seen_ids.add(bid_id)
+                    out.append(result(SOURCE, "Town of Islip", title, href,
+                                      due=due))
+
+        if diag:
+            print(f"[Islip DIAG] logged in OK, harvested {len(out)} matches")
+
+    except PWTimeout:
+        print("[Islip] Timed out")
+    except Exception as e:
+        print(f"[Islip] Error: {e}")
+    finally:
+        await browser.close()
+    print(f"[Islip] {len(out)} matches")
+    return out
+
+
+# ─── Town of North Hempstead (Revize CMS bids page, static) ───────────────────
+# Rows pair a bid-number link (usually a PDF) with a description and two dates.
+# The page lists both open and long-closed bids, so we keep only rows whose Due
+# Date is today or later.
+
+def scrape_north_hempstead() -> list[dict]:
+    out = []
+    url = "https://www.northhempsteadny.gov/departments/purchasing/bids___rfps/index.php"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        import datetime as _dt
+        today = _dt.date.today()
+
+        for li in soup.find_all("li"):
+            link = li.find("a", href=True)
+            if not link:
+                continue
+            full = li.get_text(" ", strip=True)
+            # Real bid rows carry release+due dates; nav-menu <li> blobs don't.
+            # Requiring 2+ dates (and a sane length) excludes the site menus.
+            dates = re.findall(r"[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4}", full)
+            if len(dates) < 2 or len(full) > 400:
+                continue
+            bid_no = link.get_text(strip=True)
+            desc = full
+            if bid_no and full.startswith(bid_no):
+                desc = full[len(bid_no):].strip()
+            due = dates[-1]
+            # Skip closed bids (due date in the past)
+            if due:
+                try:
+                    d = _dt.datetime.strptime(due, "%B %d, %Y").date()
+                    if d < today:
+                        continue
+                except ValueError:
+                    pass
+            # Title = the description with dates/times stripped off the end.
+            title = re.split(r"\s+[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4}", desc)[0].strip()
+            if not title or len(title) < 6:
+                continue
+            href = link["href"]
+            if href.startswith("/"):
+                href = "https://www.northhempsteadny.gov" + href
+            elif not href.startswith("http"):
+                href = "https://www.northhempsteadny.gov/" + href
+            if matches(title):
+                out.append(result(SOURCE, "Town of North Hempstead", title, href,
+                                  due=due or "Unknown", extra=bid_no))
+    except Exception as e:
+        print(f"[North Hempstead] Error: {e}")
     return out
 
 
@@ -313,11 +534,12 @@ async def scrape_southampton(pw, diag: bool = False) -> list[dict]:
 
 async def _fetch_playwright_towns(diag: bool = False) -> list[dict]:
     async with async_playwright() as pw:
-        babylon, southampton = await asyncio.gather(
+        babylon, southampton, islip = await asyncio.gather(
             scrape_babylon(pw),
             scrape_southampton(pw, diag=diag),
+            scrape_islip(pw, diag=diag),
         )
-    return babylon + southampton
+    return babylon + southampton + islip
 
 
 def get_all_suffolk_town_results() -> list[dict]:
@@ -329,11 +551,13 @@ def get_all_suffolk_town_results() -> list[dict]:
         + scrape_huntington()
         + scrape_smithtown()
         + scrape_civicengage_all()
+        + scrape_north_hempstead()
+        + scrape_oyster_bay()
     )
     playwright_results = asyncio.run(_fetch_playwright_towns(diag=diag))
     all_results = static_results + playwright_results
-    print(f"[Suffolk Towns] static (Brookhaven/Huntington/Smithtown/Riverhead/"
-          f"EastHampton/Southold/ShelterIsland): {len(static_results)} | "
+    print(f"[Suffolk Towns] static (Brookhaven/Huntington/Smithtown/4x CivicEngage"
+          f"+Hempstead/NorthHempstead/OysterBay): {len(static_results)} | "
           f"Playwright (Babylon/Southampton): {len(playwright_results)}")
     return all_results
 

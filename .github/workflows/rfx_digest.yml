@@ -31,7 +31,9 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RFX_RECIPIENT: ${{ secrets.RFX_RECIPIENT }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          LLM_MODE: off
+          ISLIP_EMAIL: ${{ secrets.ISLIP_EMAIL }}
+          ISLIP_PASSWORD: ${{ secrets.ISLIP_PASSWORD }}
+          LLM_MODE: off   # relevance filter off; rfx_classify does the tagging
         run: py rfx_alert.py
 
       - name: Commit updated seen-file

@@ -42,7 +42,9 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 from rfx_common import matches, result
 
-SOURCE = "Suffolk Towns"   # one digest section for all towns; agency = the town
+SOURCE = "Suffolk Towns"          # digest section for Suffolk town bids
+SOURCE_NASSAU = "Nassau Towns"    # digest section for Nassau town bids
+# (agency = the specific town, shown under whichever section)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -144,15 +146,15 @@ def scrape_smithtown() -> list[dict]:
 # server-rendered. Bid items are links whose href contains "bidID=".
 
 CIVICENGAGE_TOWNS = [
-    ("Town of Riverhead",      "https://www.townofriverheadny.gov/bids.aspx"),
-    ("Town of East Hampton",   "https://ehamptonny.gov/Bids.aspx"),
-    ("Town of Southold",       "https://www.southoldtownny.gov/Bids.aspx"),
-    ("Town of Shelter Island", "https://www.shelterislandtown.gov/Bids.aspx"),
-    ("Town of Hempstead",      "https://hempsteadny.gov/Bids.aspx"),
+    ("Town of Riverhead",      "https://www.townofriverheadny.gov/bids.aspx", SOURCE),
+    ("Town of East Hampton",   "https://ehamptonny.gov/Bids.aspx", SOURCE),
+    ("Town of Southold",       "https://www.southoldtownny.gov/Bids.aspx", SOURCE),
+    ("Town of Shelter Island", "https://www.shelterislandtown.gov/Bids.aspx", SOURCE),
+    ("Town of Hempstead",      "https://hempsteadny.gov/Bids.aspx", SOURCE_NASSAU),
 ]
 
 
-def scrape_civicengage_town(town_name: str, url: str) -> list[dict]:
+def scrape_civicengage_town(town_name: str, url: str, source: str = SOURCE) -> list[dict]:
     out = []
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
@@ -176,7 +178,7 @@ def scrape_civicengage_town(town_name: str, url: str) -> list[dict]:
                 href = base + ("/" if not href.startswith("/") else "") + href.lstrip("/")
             if matches(title):
                 seen_ids.add(bid_id)
-                out.append(result(SOURCE, town_name, title, href))
+                out.append(result(source, town_name, title, href))
     except Exception as e:
         print(f"[{town_name}] Error: {e}")
     return out
@@ -184,8 +186,8 @@ def scrape_civicengage_town(town_name: str, url: str) -> list[dict]:
 
 def scrape_civicengage_all() -> list[dict]:
     out = []
-    for name, url in CIVICENGAGE_TOWNS:
-        out += scrape_civicengage_town(name, url)
+    for name, url, source in CIVICENGAGE_TOWNS:
+        out += scrape_civicengage_town(name, url, source)
     return out
 
 
@@ -235,7 +237,7 @@ def scrape_oyster_bay() -> list[dict]:
                 continue
             bid_no = texts[0][:40] if texts[0] != title else ""
             if matches(title):
-                out.append(result(SOURCE, "Town of Oyster Bay", title, href,
+                out.append(result(SOURCE_NASSAU, "Town of Oyster Bay", title, href,
                                   due=due or "Unknown", extra=bid_no))
     except Exception as e:
         print(f"[Oyster Bay] Error: {e}")
@@ -400,7 +402,7 @@ def scrape_north_hempstead() -> list[dict]:
             elif not href.startswith("http"):
                 href = "https://www.northhempsteadny.gov/" + href
             if matches(title):
-                out.append(result(SOURCE, "Town of North Hempstead", title, href,
+                out.append(result(SOURCE_NASSAU, "Town of North Hempstead", title, href,
                                   due=due or "Unknown", extra=bid_no))
     except Exception as e:
         print(f"[North Hempstead] Error: {e}")

@@ -5,7 +5,7 @@ on:
     # 11:00 UTC = 7:00 AM Eastern (EDT). Only fires if the self-hosted
     # runner (your PC) is on and the runner is listening (run.cmd running
     # or the auto-start Task Scheduler entry has kicked it off).
-    - cron: '0 11 * * *'
+    - cron: '0 11 * * 0'
   workflow_dispatch:   # manual "Run workflow" button — works from mobile app
 
 permissions:

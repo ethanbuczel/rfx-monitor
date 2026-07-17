@@ -581,9 +581,40 @@ def build_html(results: list[dict]) -> str:
         return (f"<br><span style='font-size:12px;'>{dot}"
                 f"<b style='color:{color}'>{label}</b>{reason_html}</span>")
 
+    import datetime as _dt
+
+    def _due_sort_key(it: dict):
+        """Parse an item's due date to a date for sorting. Handles the several
+        formats sources emit (m/d/y, 'July 29, 2026', 'Jul 24th 2026', ISO).
+        Items with no parseable due date sort to the BOTTOM."""
+        raw = (it.get("due") or "").strip()
+        if not raw or raw.lower() in ("unknown", "n/a"):
+            return _dt.date.max
+        # Strip ordinal suffixes (1st, 2nd, 3rd, 24th) and extra time text.
+        cleaned = re.sub(r"(\d+)(st|nd|rd|th)", r"\1", raw, flags=re.I)
+        cleaned = cleaned.split(" at ")[0].strip()
+        for fmt in ("%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%b %d %Y",
+                    "%b %d, %Y", "%Y-%m-%d", "%B %d %Y"):
+            try:
+                return _dt.datetime.strptime(cleaned, fmt).date()
+            except ValueError:
+                continue
+        # Last resort: find any m/d/y inside the string.
+        m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", raw)
+        if m:
+            mm, dd, yy = (int(x) for x in m.groups())
+            yy += 2000 if yy < 100 else 0
+            try:
+                return _dt.date(yy, mm, dd)
+            except ValueError:
+                pass
+        return _dt.date.max
+
     for source, items in sorted(by_source.items()):
-        # New items first, then the rest, each group keeping its order.
-        items.sort(key=lambda x: not x.get("is_new"))
+        # Sort by soonest due date first; undated items fall to the bottom.
+        # (NEW items keep their badge/highlight but no longer force to top —
+        # due-date urgency is the primary ordering.)
+        items.sort(key=_due_sort_key)
         n_new = sum(1 for x in items if x.get("is_new"))
         head = f"{source} ({len(items)}"
         head += f", {n_new} new)" if n_new else ")"

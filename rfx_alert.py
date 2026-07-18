@@ -610,7 +610,10 @@ def build_html(results: list[dict]) -> str:
                 pass
         return _dt.date.max
 
-    for source, items in sorted(by_source.items()):
+    # Sections alphabetical, but always push "Future RFPs" to the very bottom.
+    def _section_order(kv):
+        return (kv[0] == "Future RFPs", kv[0])
+    for source, items in sorted(by_source.items(), key=_section_order):
         # Sort by soonest due date first; undated items fall to the bottom.
         # (NEW items keep their badge/highlight but no longer force to top —
         # due-date urgency is the primary ordering.)
@@ -702,6 +705,14 @@ def main() -> None:
         all_results += get_all_suffolk_town_results()
     except Exception as e:
         print(f"[suffolk towns] module error (continuing without it): {e}")
+
+    # Upcoming / not-yet-advertised opportunities (heads-up section, sorts last).
+    try:
+        from rfx_future import get_future_results, get_current_results
+        all_results += get_current_results()   # NYC DOT currently-open RFPs
+        all_results += get_future_results()    # NYSDOT prelim + NYC DOT future
+    except Exception as e:
+        print(f"[future] module error (continuing without it): {e}")
 
     # Final dedup by (title, url).
     seen, deduped = set(), []

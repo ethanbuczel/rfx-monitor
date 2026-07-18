@@ -360,7 +360,23 @@ async def fetch_all_playwright() -> list[dict]:
 
 def get_playwright_results() -> list[dict]:
     """Synchronous wrapper — call this from your main rfx_alert.py."""
-    return asyncio.run(fetch_all_playwright())
+    rows = asyncio.run(fetch_all_playwright())
+    # These scrapers build plain dicts without a 'source' key; the digest's
+    # dedup/new-tracking (rfx_alert._seen_key) requires 'source' on every item.
+    # Map agency -> section source so each lands in the right digest section.
+    agency_to_source = {
+        "PANYNJ Bonfire": "PANYNJ Bonfire",
+        "NYC PASSPort": "NYC PASSPort",
+        "Suffolk County DPW": "Suffolk County DPW",
+        "Nassau County": "Nassau County",
+    }
+    for r in rows:
+        r.setdefault("source", agency_to_source.get(r.get("agency", ""),
+                                                     r.get("agency", "Other")))
+        # Ensure the other keys the digest expects always exist.
+        r.setdefault("due", r.get("due", "Unknown"))
+        r.setdefault("extra", r.get("extra", ""))
+    return rows
 
 
 # ─── Standalone test ──────────────────────────────────────────────────────────

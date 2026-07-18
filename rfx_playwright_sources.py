@@ -134,6 +134,26 @@ async def scrape_passport(pw) -> list[dict]:
             full = re.sub(r"\s+", " ", container or "").strip()
             if not _match(full):
                 continue
+
+            # STATUS FILTER: PASSPort rows carry a status word. Only keep ones
+            # that are actually open for bidding. Drop dead stages — the date
+            # shown for those is a status-change timestamp (often long past),
+            # which is why closed jobs were leaking in with stale dates.
+            low = full.lower()
+            DEAD = ("closed", "selections made", "responses received",
+                    "response received", "cancelled", "canceled", "awarded",
+                    "not awarded", "selection made", "expired")
+            if any(d in low for d in DEAD):
+                continue
+            # Prefer explicitly-open statuses; if no recognizable status at all,
+            # keep it (some rows omit status) so we don't over-filter.
+            OPEN = ("released", "open", "accepting", "active", "rfi", "rfp",
+                    "rfq", "invitation", "solicit")
+            has_status = any(s in low for s in OPEN) or not any(
+                w in low for w in ("released", "closed", "responses",
+                                    "selections", "cancel", "award", "expired"))
+            if not has_status:
+                continue
             if not href.startswith("http"):
                 href = "https://passport.cityofnewyork.us" + href
             if href in _seen_keys:
@@ -143,12 +163,15 @@ async def scrape_passport(pw) -> list[dict]:
             # ALLCAPS run or a reasonable length.
             link_txt = re.sub(r"^\s*Edit\s+", "", (await lk.inner_text()).strip())
             title = link_txt.split("\n")[0][:160] or full[:120]
-            # Date: grab a m/d/y if present in the row.
-            dm = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", full)
+            # Date: capture any date in the row (best-effort). With the status
+            # filter above, we're only looking at open items now.
+            all_dates = re.findall(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", full)
+            due = all_dates[-1] if all_dates else ""
             results.append({
                 "title": title,
                 "agency": "NYC PASSPort",
-                "date": dm.group(1) if dm else "",
+                "date": due,
+                "due": due or "Unknown",
                 "url": href,
             })
             found += 1

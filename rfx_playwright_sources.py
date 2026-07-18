@@ -163,15 +163,14 @@ async def scrape_passport(pw) -> list[dict]:
             # ALLCAPS run or a reasonable length.
             link_txt = re.sub(r"^\s*Edit\s+", "", (await lk.inner_text()).strip())
             title = link_txt.split("\n")[0][:160] or full[:120]
-            # Date: capture any date in the row (best-effort). With the status
-            # filter above, we're only looking at open items now.
-            all_dates = re.findall(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", full)
-            due = all_dates[-1] if all_dates else ""
+            # Browse-page date is unreliable (often a status timestamp, and the
+            # real Due Date lives only on the detail page). Store the candidate;
+            # the real due date is resolved in a second pass below.
             results.append({
                 "title": title,
                 "agency": "NYC PASSPort",
-                "date": due,
-                "due": due or "Unknown",
+                "date": "",
+                "due": "Unknown",
                 "url": href,
             })
             found += 1
@@ -248,6 +247,42 @@ async def scrape_passport(pw) -> list[dict]:
                 await page.wait_for_timeout(2500)  # let the next page render
             except Exception:
                 break
+
+        # ── Second pass: resolve each item's REAL Due Date from its detail
+        # page and drop anything past due. The browse page doesn't expose the
+        # due date (it's under "Key Dates > Due Date" on the detail page), which
+        # is why expired items were slipping through as "Unknown". Slower (one
+        # load per item) but accurate.
+        import datetime as _dt
+        today = _dt.date.today()
+        kept = []
+        for item in results:
+            due_date = None
+            try:
+                await page.goto(item["url"], timeout=25000,
+                                wait_until="domcontentloaded")
+                await page.wait_for_timeout(1200)
+                body = await page.inner_text("body")
+                # Find the "Due Date" label and the m/d/y that follows it.
+                m = re.search(
+                    r"Due Date\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{2,4})",
+                    body, re.I)
+                if m:
+                    item["due"] = m.group(1)
+                    item["date"] = m.group(1)
+                    try:
+                        mm, dd, yy = (int(x) for x in m.group(1).split("/"))
+                        yy += 2000 if yy < 100 else 0
+                        due_date = _dt.date(yy, mm, dd)
+                    except ValueError:
+                        due_date = None
+            except Exception:
+                pass  # if the detail page won't load, keep it (fail open)
+            # Drop only when we positively know the due date is past.
+            if due_date is not None and due_date < today:
+                continue
+            kept.append(item)
+        results[:] = kept
 
     except PWTimeout:
         print("[PASSPort] Timed out — site may be slow")

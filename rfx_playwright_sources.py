@@ -1,251 +1,375 @@
 """
 rfx_playwright_sources.py
--------------------------
-Headless-Chromium scrapers for the four JavaScript-heavy portals that block
-plain requests/Selenium: PANYNJ Bonfire, NYC PASSPort, Suffolk County,
-Nassau County.
+Playwright-based scrapers for JS-heavy RFx portals.
+Replaces the Selenium/requests versions of these 4 sources:
+  - PANYNJ Bonfire
+  - NYC PASSPort
+  - Suffolk County DPW
+  - Nassau County
 
-Each scraper renders the page, waits for content, grabs candidate rows, and
-keyword-filters them through rfx_common.matches().
+SETUP:
+  pip install playwright --break-system-packages
+  python -m playwright install chromium
 
-IMPORTANT — these four sites change their markup periodically, so the CSS
-selectors below are a STARTING POINT and will likely need tuning against live
-output. Run this file standalone first:
-
-    py rfx_playwright_sources.py
-
-It prints a per-source count and any errors. Paste that back and the selectors
-get fixed source-by-source. One source failing never kills the others
-(asyncio.gather runs with return_exceptions=True).
+Usage: import and call each function, or run this file standalone to test.
+Each function returns a list of dicts:
+  { "title": str, "agency": str, "date": str, "url": str }
 """
 
-import re
 import asyncio
-import datetime as dt
-from rfx_common import matches, result
+import re
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-try:
-    from playwright.async_api import async_playwright
-except ImportError:
-    async_playwright = None
+KEYWORDS = [
+    "traffic", "signal", "roadway", "intersection", "pavement",
+    "transportation", "highway", "civil engineering", "ITS",
+    "pedestrian", "bicycle", "signing", "striping", "marking",
+    "bridge", "drainage", "corridor", "complete streets", "work zone",
+    "MOT", "maintenance of traffic", "construction inspection"
+]
 
-
-def _clean_bonfire(text):
-    """Turn a Bonfire row blob into (short_title, due_date)."""
-    cells = [c.strip() for c in re.split(r"\t", text) if c.strip()]
-    due = "Unknown"
-    for c in cells:                     # the date cell, e.g. "Dec 31st 2026, 2:00 PM EST"
-        if re.search(r"[A-Z][a-z]{2}\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}", c):
-            due = re.sub(r",?\s*\d{1,2}:\d{2}.*$", "", c).strip()
-            break
-    desc = max(cells, key=len) if cells else text   # the long description cell
-    desc = re.sub(r"(?i)^RFP\s*#?\s*\d+\s*-\s*", "", desc)
-    desc = re.sub(r"(?i)\s*-\s*OPEN\s*$", "", desc)
-    desc = re.sub(r"\s+", " ", desc).strip()
-    if len(desc) > 130:
-        desc = desc[:127] + "..."
-    nm = re.search(r"RFP\s*#?\s*(\d+)", text)
-    return (f"RFP {nm.group(1)}: {desc}" if nm else desc), due
+def keyword_match(text: str) -> bool:
+    t = text.lower()
+    return any(k.lower() in t for k in KEYWORDS)
 
 
-def _clean_passport(text):
-    """Turn a PASSPort row blob into (short_title, due_date)."""
-    cells = [c.strip() for c in re.split(r"\t", text) if c.strip()]
-    if cells and cells[0].lower() == "edit":
-        cells = cells[1:]
-    titleid = cells[0] if cells else text[:80]
-    agency = ""
-    for c in cells:
-        if c.isupper() and len(c) > 8 and any(
-                w in c for w in ("DEPARTMENT", "AUTHORITY", "OFFICE", "ADMINISTRATION")):
-            agency = c
-            break
-    parsed = []
-    for s in re.findall(r"\d{1,2}/\d{1,2}/\d{4}", text):
-        try:
-            parsed.append(dt.datetime.strptime(s, "%m/%d/%Y"))
-        except ValueError:
-            pass
-    due = max(parsed).strftime("%m/%d/%Y") if parsed else "Unknown"
-    title = f"{titleid} ({agency})" if agency else titleid
-    if len(title) > 140:
-        title = title[:137] + "..."
-    return title, due
-
-
-# Common launch args that reduce bot-detection on these portals.
-LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
-NAV_TIMEOUT = 45_000  # ms
-
-
-async def _new_page(pw):
-    browser = await pw.chromium.launch(headless=True, args=LAUNCH_ARGS)
-    ctx = await browser.new_context(user_agent=UA, viewport={"width": 1366, "height": 900})
-    page = await ctx.new_page()
-    page.set_default_timeout(NAV_TIMEOUT)
-    return browser, page
-
-
-# ─── Bonfire (generic — works for any *.bonfirehub.com portal) ─────────────────
-async def _scrape_bonfire(pw, portal_url, agency, source) -> list[dict]:
-    out = []
-    origin = "/".join(portal_url.split("/")[:3])  # e.g. https://panynj.bonfirehub.com
-    browser, page = await _new_page(pw)
-    try:
-        await page.goto(portal_url, wait_until="networkidle")
-        # Bonfire renders opportunities into a table; wait for any row.
-        await page.wait_for_selector("table tbody tr", timeout=NAV_TIMEOUT)
-        rows = await page.query_selector_all("table tbody tr")
-        for row in rows:
-            text = (await row.inner_text()).replace("\n", " ").strip()
-            if not matches(text):
-                continue
-            link = await row.query_selector("a")
-            href = await link.get_attribute("href") if link else ""
-            if href and href.startswith("/"):
-                href = origin + href
-            title, due = _clean_bonfire(text)
-            out.append(result(source, agency, title, href or portal_url, due=due))
-    except Exception as e:
-        print(f"[{source}] {type(e).__name__}: {e}")
-    finally:
-        await browser.close()
-    return out
-
+# ─── 1. PANYNJ Bonfire ────────────────────────────────────────────────────────
 
 async def scrape_bonfire(pw) -> list[dict]:
-    return await _scrape_bonfire(
-        pw, "https://panynj.bonfirehub.com/portal/?tab=openOpportunities",
-        "PANYNJ", "PANYNJ Bonfire")
+    results = []
+    browser = await pw.chromium.launch(headless=True)
+    ctx = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    page = await ctx.new_page()
+    try:
+        await page.goto("https://panynj.bonfirehub.com/opportunities", timeout=30000)
+        # Wait for opportunity cards to load
+        await page.wait_for_selector("div.opportunity-card, div.opportunity-list-item, article", timeout=20000)
+        await page.wait_for_timeout(2000)  # let any lazy-load settle
+
+        # Try multiple possible card selectors Bonfire uses
+        cards = await page.query_selector_all("div.opportunity-card")
+        if not cards:
+            cards = await page.query_selector_all("div[class*='opportunity']")
+
+        for card in cards:
+            title_el = await card.query_selector("h2, h3, .title, [class*='title']")
+            title = (await title_el.inner_text()).strip() if title_el else ""
+            link_el = await card.query_selector("a")
+            href = await link_el.get_attribute("href") if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://panynj.bonfirehub.com" + href
+            date_el = await card.query_selector("[class*='date'], [class*='close'], time")
+            date = (await date_el.inner_text()).strip() if date_el else ""
+
+            if title and keyword_match(title):
+                results.append({
+                    "title": title,
+                    "agency": "PANYNJ Bonfire",
+                    "date": date,
+                    "url": href or "https://panynj.bonfirehub.com/opportunities"
+                })
+
+        # Fallback: grab all text links if card parsing got nothing
+        if not results:
+            links = await page.query_selector_all("a[href*='/opportunities/']")
+            for link in links:
+                text = (await link.inner_text()).strip()
+                href = await link.get_attribute("href") or ""
+                if not href.startswith("http"):
+                    href = "https://panynj.bonfirehub.com" + href
+                if text and keyword_match(text):
+                    results.append({
+                        "title": text,
+                        "agency": "PANYNJ Bonfire",
+                        "date": "",
+                        "url": href
+                    })
+
+    except PWTimeout:
+        print("[Bonfire] Timed out waiting for content")
+    except Exception as e:
+        print(f"[Bonfire] Error: {e}")
+    finally:
+        await browser.close()
+    return results
 
 
-async def scrape_suffolk_bonfire(pw) -> list[dict]:
-    return await _scrape_bonfire(
-        pw, "https://suffolkcountyny.bonfirehub.com/portal/?tab=openOpportunities",
-        "Suffolk County", "Suffolk Bonfire")
+# ─── 2. NYC PASSPort ──────────────────────────────────────────────────────────
 
-
-# ─── NYC PASSPort (public solicitations) ──────────────────────────────────────
 async def scrape_passport(pw) -> list[dict]:
-    url = "https://passport.cityofnewyork.us/page.aspx/en/rfp/request_browse_public"
-    out = []
-    browser, page = await _new_page(pw)
+    results = []
+    browser = await pw.chromium.launch(headless=True)
+    ctx = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    page = await ctx.new_page()
+
     try:
-        await page.goto(url, wait_until="networkidle")
-        # Don't hard-wait on row visibility (PASSPort rows often aren't "visible"
-        # to Playwright until a search is run); just grab what rendered.
-        await page.wait_for_timeout(3000)
-        rows = await page.query_selector_all("table tr")
-        for row in rows:
-            text = (await row.inner_text()).replace("\n", " ").strip()
-            if not text or not matches(text):
+        from rfx_common import matches as _match
+    except Exception:
+        _match = keyword_match
+
+    async def _harvest_current_page():
+        """Parse all keyword-matching solicitations on the loaded page.
+        PASSPort renders each solicitation as a link to
+        /bpm/process_manage_extranet/NNN inside a container div (NOT a table),
+        so target those links and read their surrounding container text."""
+        found = 0
+        links = await page.query_selector_all(
+            "a[href*='process_manage_extranet'], a[href*='/bpm/']")
+        for lk in links:
+            href = await lk.get_attribute("href") or ""
+            if "process_manage_extranet" not in href and "/bpm/" not in href:
                 continue
-            link = await row.query_selector("a")
-            href = await link.get_attribute("href") if link else ""
-            if href and href.startswith("/"):
+            # Full row text from the nearest container that holds the details.
+            try:
+                container = await lk.evaluate(
+                    "el => { let p = el; for (let i=0;i<5;i++){ if(!p.parentElement) break; p = p.parentElement; if (p.innerText && p.innerText.length > 60) return p.innerText; } return el.innerText; }")
+            except Exception:
+                container = (await lk.inner_text())
+            full = re.sub(r"\s+", " ", container or "").strip()
+            if not _match(full):
+                continue
+            if not href.startswith("http"):
                 href = "https://passport.cityofnewyork.us" + href
-            title, due = _clean_passport(text)
-            out.append(result("NYC PASSPort", "NYC", title, href or url, due=due))
-    except Exception as e:
-        print(f"[PASSPort] {type(e).__name__}: {e}")
-    finally:
-        await browser.close()
-    return out
+            if href in _seen_keys:
+                continue
+            _seen_keys.add(href)
+            # Title: strip the leading "Edit " and use up to the first agency-ish
+            # ALLCAPS run or a reasonable length.
+            link_txt = re.sub(r"^\s*Edit\s+", "", (await lk.inner_text()).strip())
+            title = link_txt.split("\n")[0][:160] or full[:120]
+            # Date: grab a m/d/y if present in the row.
+            dm = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", full)
+            results.append({
+                "title": title,
+                "agency": "NYC PASSPort",
+                "date": dm.group(1) if dm else "",
+                "url": href,
+            })
+            found += 1
+        return found
 
-
-# ─── Suffolk County (procurement / bids) ──────────────────────────────────────
-async def scrape_suffolk(pw) -> list[dict]:
-    # Suffolk posts bids/RFPs here; confirm the live URL if this changes.
-    url = "https://www.suffolkcountyny.gov/Departments/Economic-Development-and-Planning/Purchasing/Bid-Opportunities"
-    out = []
-    browser, page = await _new_page(pw)
+    _seen_keys = set()
     try:
-        await page.goto(url, wait_until="networkidle")
-        await page.wait_for_load_state("networkidle")
-        # Resilient: scan all links on the rendered page.
-        links = await page.query_selector_all("a")
-        for a in links:
-            text = (await a.inner_text()).strip().replace("\n", " ")
-            if not text or len(text) < 8 or not matches(text):
-                continue
-            href = await a.get_attribute("href") or ""
-            # Skip map pins, addresses, mailto, and off-site junk.
-            if "google.com/maps" in href or href.startswith("mailto:"):
-                continue
-            if href.startswith("/"):
-                href = "https://www.suffolkcountyny.gov" + href
-            # Keep only links that point into the county site.
-            if "suffolkcountyny.gov" not in href:
-                continue
-            out.append(result("Suffolk County", "Suffolk County", text, href))
-    except Exception as e:
-        print(f"[Suffolk] {type(e).__name__}: {e}")
-    finally:
-        await browser.close()
-    return out
-
-
-# ─── Nassau County (Oracle APEX bid portal) ───────────────────────────────────
-async def scrape_nassau(pw) -> list[dict]:
-    url = "https://www.nassaucountyny.gov/2127/Bid-Opportunities"
-    out = []
-    browser, page = await _new_page(pw)
-    try:
-        await page.goto(url, wait_until="networkidle")
-        await page.wait_for_load_state("networkidle")
-        links = await page.query_selector_all("a")
-        for a in links:
-            text = (await a.inner_text()).strip()
-            if not text or len(text) < 8 or not matches(text):
-                continue
-            href = await a.get_attribute("href") or ""
-            if href.startswith("/"):
-                href = "https://www.nassaucountyny.gov" + href
-            out.append(result("Nassau County", "Nassau County", text, href or url))
-    except Exception as e:
-        print(f"[Nassau] {type(e).__name__}: {e}")
-    finally:
-        await browser.close()
-    return out
-
-
-# ─── Orchestration ────────────────────────────────────────────────────────────
-async def fetch_all_playwright() -> list[dict]:
-    if async_playwright is None:
-        print("[Playwright] not installed — run: py -m pip install playwright "
-              "&& py -m playwright install chromium")
-        return []
-
-    async with async_playwright() as pw:
-        results = await asyncio.gather(
-            scrape_bonfire(pw),
-            scrape_suffolk_bonfire(pw),
-            scrape_passport(pw),
-            return_exceptions=True,
+        await page.goto(
+            "https://passport.cityofnewyork.us/page.aspx/en/rfp/request_browse_public",
+            timeout=30000
         )
+        await page.wait_for_load_state("networkidle", timeout=25000)
+        await page.wait_for_timeout(2000)
 
-    names = ["Bonfire", "Suffolk Bonfire", "PASSPort"]
-    all_results = []
-    for name, res in zip(names, results):
-        if isinstance(res, Exception):
-            print(f"[{name}] crashed: {type(res).__name__}: {res}")
-        else:
-            print(f"[{name}] {len(res)} matches")
-            all_results.extend(res)
+        import os as _os
+        if _os.environ.get("DIAG"):
+            # The results render as divs (iv-browse / iv-page), not a <table>.
+            # Dump candidate result containers and their text so we can target
+            # the real solicitation rows.
+            for sel in (".iv-browse", ".iv-page", "[class*='iv-row']",
+                        "[class*='result']", "[class*='row']",
+                        "[class*='list-item']", "[class*='listItem']",
+                        "[role='row']"):
+                els = await page.query_selector_all(sel)
+                if els:
+                    print(f"[PASSPort DIAG] sel {sel!r}: {len(els)} elements")
+            # Find elements that link to a solicitation detail page — those
+            # anchor the real rows.
+            links = await page.query_selector_all(
+                "a[href*='process_manage_extranet'], a[href*='bpm']")
+            print(f"[PASSPort DIAG] solicitation links found: {len(links)}")
+            for i, lk in enumerate(links[:8]):
+                txt = (await lk.inner_text()).strip().replace("\n", " ")
+                href = await lk.get_attribute("href") or ""
+                # Walk up to the container that holds this row's full text.
+                container_txt = ""
+                try:
+                    container_txt = await lk.evaluate(
+                        "el => { let p = el; for (let i=0;i<5;i++){ if(!p.parentElement) break; p = p.parentElement; if (p.innerText && p.innerText.length > 60) return p.innerText; } return el.innerText; }")
+                except Exception:
+                    pass
+                container_txt = re.sub(r"\s+", " ", container_txt)[:180]
+                print(f"[PASSPort DIAG] link[{i}] text={txt[:50]!r}")
+                print(f"      href={href[:70]}")
+                print(f"      container={container_txt!r}")
+
+        # Page through all results. The board uses a pager; click the "next"
+        # control until it's gone/disabled. Safety cap prevents infinite loops.
+        MAX_PAGES = 25
+        for _ in range(MAX_PAGES):
+            await _harvest_current_page()
+            # Find an enabled "next page" control. PASSPort's real pager (per
+            # DIAG) is an aria-label='Next' button with class 'ui button icon';
+            # it disables via a 'disabled' class/attr when on the last page.
+            nxt = None
+            for sel in ("[aria-label*='Next']:not([disabled])",
+                        "button[aria-label*='Next']",
+                        "a[aria-label*='Next']",
+                        ".iv-page [aria-label*='Next']"):
+                cand = await page.query_selector(sel)
+                if cand:
+                    cls = (await cand.get_attribute("class")) or ""
+                    disabled_attr = await cand.get_attribute("disabled")
+                    aria_dis = await cand.get_attribute("aria-disabled")
+                    if ("disabled" in cls.lower() or disabled_attr is not None
+                            or aria_dis == "true"):
+                        continue
+                    nxt = cand
+                    break
+            if not nxt:
+                break
+            try:
+                await nxt.click()
+                await page.wait_for_timeout(2500)  # let the next page render
+            except Exception:
+                break
+
+    except PWTimeout:
+        print("[PASSPort] Timed out — site may be slow")
+    except Exception as e:
+        print(f"[PASSPort] Error: {e}")
+    finally:
+        await browser.close()
+    print(f"[PASSPort] {len(results)} matches")
+    return results
+
+
+# ─── 3. Suffolk County DPW ────────────────────────────────────────────────────
+
+async def scrape_suffolk(pw) -> list[dict]:
+    results = []
+    browser = await pw.chromium.launch(headless=True)
+    ctx = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    page = await ctx.new_page()
+    try:
+        await page.goto(
+            "https://www.suffolkcountyny.gov/Departments/Public-Works/Procurement",
+            timeout=30000
+        )
+        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_timeout(1500)
+
+        # Suffolk usually lists bids as links in a content area
+        links = await page.query_selector_all("div.field-items a, div.content a, main a")
+        for link in links:
+            text = (await link.inner_text()).strip()
+            href = await link.get_attribute("href") or ""
+            if not href.startswith("http"):
+                href = "https://www.suffolkcountyny.gov" + href
+            # Skip nav/utility links
+            if len(text) < 10 or not any(c.isalpha() for c in text):
+                continue
+            if keyword_match(text):
+                results.append({
+                    "title": text,
+                    "agency": "Suffolk County DPW",
+                    "date": "",
+                    "url": href
+                })
+
+        # Also check for embedded BidNet iframe or redirect notice
+        if not results:
+            body = await page.inner_text("body")
+            if "bidnet" in body.lower():
+                results.append({
+                    "title": "Suffolk County bids now on BidNet Direct",
+                    "agency": "Suffolk County DPW",
+                    "date": "",
+                    "url": "https://www.bidnetdirect.com/suffolk-county-new-york"
+                })
+
+    except PWTimeout:
+        print("[Suffolk] Timed out")
+    except Exception as e:
+        print(f"[Suffolk] Error: {e}")
+    finally:
+        await browser.close()
+    return results
+
+
+# ─── 4. Nassau County ─────────────────────────────────────────────────────────
+
+async def scrape_nassau(pw) -> list[dict]:
+    results = []
+    browser = await pw.chromium.launch(headless=True)
+    ctx = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    page = await ctx.new_page()
+    try:
+        # Nassau County formal solicitations — Oracle APEX app
+        await page.goto(
+            "https://apps.nassaucountyny.gov/f?p=172:1",
+            timeout=30000
+        )
+        await page.wait_for_load_state("networkidle", timeout=25000)
+        await page.wait_for_timeout(3000)  # Oracle APEX needs extra time
+
+        # APEX renders rows as t-Report rows
+        rows = await page.query_selector_all("tr.highlight-row, table.t-Report-report tr")
+        for row in rows:
+            cells = await row.query_selector_all("td")
+            if not cells:
+                continue
+            texts = [(await c.inner_text()).strip() for c in cells]
+            full = " ".join(texts)
+            if not keyword_match(full):
+                continue
+            link_el = await row.query_selector("a")
+            href = await link_el.get_attribute("href") if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://apps.nassaucountyny.gov" + href
+            results.append({
+                "title": texts[0] if texts else full[:120],
+                "agency": "Nassau County",
+                "date": texts[1] if len(texts) > 1 else "",
+                "url": href or "https://apps.nassaucountyny.gov/f?p=172:1"
+            })
+
+    except PWTimeout:
+        print("[Nassau] Timed out — Oracle APEX was slow")
+    except Exception as e:
+        print(f"[Nassau] Error: {e}")
+    finally:
+        await browser.close()
+    return results
+
+
+# ─── Runner ───────────────────────────────────────────────────────────────────
+
+async def fetch_all_playwright() -> list[dict]:
+    """Call all 4 Playwright scrapers and return combined results."""
+    async with async_playwright() as pw:
+        bonfire, passport, suffolk, nassau = await asyncio.gather(
+            scrape_bonfire(pw),
+            scrape_passport(pw),
+            scrape_suffolk(pw),
+            scrape_nassau(pw),
+        )
+    all_results = bonfire + passport + suffolk + nassau
+    print(f"[Playwright] Bonfire: {len(bonfire)} | PASSPort: {len(passport)} | "
+          f"Suffolk: {len(suffolk)} | Nassau: {len(nassau)}")
     return all_results
 
 
 def get_playwright_results() -> list[dict]:
-    """Synchronous wrapper called from rfx_alert.py."""
+    """Synchronous wrapper — call this from your main rfx_alert.py."""
     return asyncio.run(fetch_all_playwright())
 
 
 # ─── Standalone test ──────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    rows = get_playwright_results()
-    print(f"\nTotal keyword-matched results: {len(rows)}\n")
-    for r in rows:
-        print(f"[{r['source']}] {r['title'][:90]}")
-        print(f"   {r['url']}\n")
+    results = get_playwright_results()
+    print(f"\nTotal keyword-matched results: {len(results)}\n")
+    for r in results:
+        print(f"[{r['agency']}] {r['title']}")
+        print(f"  Date: {r['date'] or 'N/A'}")
+        print(f"  URL:  {r['url']}")
+        print()

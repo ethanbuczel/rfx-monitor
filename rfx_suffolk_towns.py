@@ -54,6 +54,44 @@ HEADERS = {
 
 # ─── 1. Town of Brookhaven (BidNet Direct, static) ────────────────────────────
 
+def scrape_suffolk_county() -> list[dict]:
+    """Suffolk County's OPEN bids live on BidNet / Empire State Purchasing
+    Group (same platform as Brookhaven), NOT on the county's own site. The
+    old Playwright scraper hit an informational DPW page and grabbed nav links
+    like 'Highway Maintenance' — this replaces it with the real bid feed."""
+    out = []
+    url = "https://www.bidnetdirect.com/new-york/suffolkcounty"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for row in soup.find_all("tr"):
+            link = row.find("a", href=True)
+            if not link:
+                continue
+            title = link.get_text(strip=True)
+            href = link["href"]
+            if href.startswith("/"):
+                href = "https://www.bidnetdirect.com" + href
+            if not title or len(title) < 5:
+                continue
+            if matches(title):
+                row_text = row.get_text(" ", strip=True)
+                due = "Unknown"
+                dm = re.search(
+                    r"clos\w*(?:\s+date)?\s*[:\-]?\s*"
+                    r"(\d{1,2}/\d{1,2}/\d{2,4}"
+                    r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s+\d{4})",
+                    row_text, re.I)
+                if dm:
+                    due = dm.group(1)
+                out.append(result("Suffolk County", "Suffolk County DPW",
+                                  title, href, due=due, extra=row_text[:120]))
+    except Exception as e:
+        print(f"[Suffolk County] Error: {e}")
+    return out
+
+
 def scrape_brookhaven() -> list[dict]:
     out = []
     url = "https://www.bidnetdirect.com/new-york/townofbrookhaven"
@@ -549,7 +587,8 @@ def get_all_suffolk_town_results() -> list[dict]:
     import os
     diag = bool(os.environ.get("DIAG"))
     static_results = (
-        scrape_brookhaven()
+        scrape_suffolk_county()
+        + scrape_brookhaven()
         + scrape_huntington()
         + scrape_smithtown()
         + scrape_civicengage_all()

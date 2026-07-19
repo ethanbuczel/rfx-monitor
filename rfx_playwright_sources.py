@@ -449,17 +449,20 @@ async def scrape_nassau(pw) -> list[dict]:
 # ─── Runner ───────────────────────────────────────────────────────────────────
 
 async def fetch_all_playwright() -> list[dict]:
-    """Call all 4 Playwright scrapers and return combined results."""
+    """Call the Playwright scrapers and return combined results.
+    NOTE: Suffolk County is no longer scraped here — the old scrape_suffolk hit
+    an informational DPW page and returned nav links ('Highway Maintenance',
+    etc.), not bids. Suffolk County's real open bids are on BidNet and are now
+    handled by scrape_suffolk_county() in rfx_suffolk_towns.py."""
     async with async_playwright() as pw:
-        bonfire, passport, suffolk, nassau = await asyncio.gather(
+        bonfire, passport, nassau = await asyncio.gather(
             scrape_bonfire(pw),
             scrape_passport(pw),
-            scrape_suffolk(pw),
             scrape_nassau(pw),
         )
-    all_results = bonfire + passport + suffolk + nassau
+    all_results = bonfire + passport + nassau
     print(f"[Playwright] Bonfire: {len(bonfire)} | PASSPort: {len(passport)} | "
-          f"Suffolk: {len(suffolk)} | Nassau: {len(nassau)}")
+          f"Nassau: {len(nassau)}")
     return all_results
 
 

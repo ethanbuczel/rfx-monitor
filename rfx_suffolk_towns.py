@@ -54,6 +54,70 @@ HEADERS = {
 
 # ─── 1. Town of Brookhaven (BidNet Direct, static) ────────────────────────────
 
+SOURCE_WESTCHESTER = "Westchester"   # digest section for Westchester bids
+
+# Westchester County municipalities on BidNet / Empire State Purchasing Group.
+# All use the same BidNet platform as Brookhaven/Suffolk, so one parser handles
+# them. (name, bidnet slug). Slugs confirmed or following BidNet's standard
+# pattern; a wrong slug just yields 0 and prints an error — it can't break the
+# others.
+WESTCHESTER_BIDNET = [
+    ("Westchester County",        "westchester-county-purchasing"),
+    ("Westchester County DPW",    "westchester-county-public-works"),
+    ("Village of Mamaroneck",     "villageofmamaroneck"),
+    ("Town of Mamaroneck",        "townofmamaroneck"),
+    ("City of Yonkers",           "cityofyonkers"),
+    ("City of New Rochelle",      "cityofnewrochelle"),
+    ("City of White Plains",      "cityofwhiteplains"),
+    ("City of Mount Vernon",      "cityofmountvernon"),
+    ("Village of Port Chester",   "villageofportchester"),
+    ("Town of Greenburgh",        "townofgreenburgh"),
+]
+
+
+def scrape_bidnet_agency(name: str, slug: str, source: str) -> list[dict]:
+    """Generic BidNet / Empire State Purchasing Group scraper for one agency.
+    Reused across Westchester municipalities (and mirrors Brookhaven/Suffolk)."""
+    out = []
+    url = f"https://www.bidnetdirect.com/new-york/{slug}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for row in soup.find_all("tr"):
+            link = row.find("a", href=True)
+            if not link:
+                continue
+            title = link.get_text(strip=True)
+            href = link["href"]
+            if href.startswith("/"):
+                href = "https://www.bidnetdirect.com" + href
+            if not title or len(title) < 5:
+                continue
+            if matches(title):
+                row_text = row.get_text(" ", strip=True)
+                due = "Unknown"
+                dm = re.search(
+                    r"clos\w*(?:\s+date)?\s*[:\-]?\s*"
+                    r"(\d{1,2}/\d{1,2}/\d{2,4}"
+                    r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s+\d{4})",
+                    row_text, re.I)
+                if dm:
+                    due = dm.group(1)
+                out.append(result(source, name, title, href,
+                                  due=due, extra=row_text[:120]))
+    except Exception as e:
+        print(f"[{name}] Error: {e}")
+    return out
+
+
+def scrape_westchester_all() -> list[dict]:
+    out = []
+    for name, slug in WESTCHESTER_BIDNET:
+        out += scrape_bidnet_agency(name, slug, SOURCE_WESTCHESTER)
+    return out
+
+
 def scrape_suffolk_county() -> list[dict]:
     """Suffolk County's OPEN bids live on BidNet / Empire State Purchasing
     Group (same platform as Brookhaven), NOT on the county's own site. The
@@ -588,6 +652,7 @@ def get_all_suffolk_town_results() -> list[dict]:
     diag = bool(os.environ.get("DIAG"))
     static_results = (
         scrape_suffolk_county()
+        + scrape_westchester_all()
         + scrape_brookhaven()
         + scrape_huntington()
         + scrape_smithtown()

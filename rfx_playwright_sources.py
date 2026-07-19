@@ -254,6 +254,7 @@ async def scrape_passport(pw) -> list[dict]:
         # is why expired items were slipping through as "Unknown". Slower (one
         # load per item) but accurate.
         import datetime as _dt
+        _diag_detail = _os.environ.get("DIAG")
         today = _dt.date.today()
         kept = []
         for item in results:
@@ -261,12 +262,58 @@ async def scrape_passport(pw) -> list[dict]:
             try:
                 await page.goto(item["url"], timeout=25000,
                                 wait_until="domcontentloaded")
-                await page.wait_for_timeout(1200)
-                body = await page.inner_text("body")
-                # Find the "Due Date" label and the m/d/y that follows it.
-                m = re.search(
-                    r"Due Date\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{2,4})",
-                    body, re.I)
+                # Key Dates render via JS after load — wait for network to
+                # settle and for the "Due Date" label to actually appear.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=12000)
+                except Exception:
+                    pass
+                try:
+                    await page.wait_for_selector("text=/Due Date/i", timeout=8000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(800)
+
+                # The dates live in INPUT field values (the body text only shows
+                # the "(M/d/yyyy)" placeholder labels). Find the input whose
+                # label/preceding text is "Due Date" and read its .value.
+                due_str = await page.evaluate(r"""
+                    () => {
+                      const dateRe = /^\d{1,2}\/\d{1,2}\/\d{2,4}$/;
+                      const inputs = Array.from(document.querySelectorAll('input'));
+                      // 1) Prefer an input whose id/name/aria-label points to the
+                      //    (non-questions, non-contract) Due Date.
+                      for (const inp of inputs) {
+                        const val = (inp.value || '').trim();
+                        if (!dateRe.test(val)) continue;
+                        const meta = ((inp.id||'') + ' ' + (inp.name||'') + ' ' +
+                                      (inp.getAttribute('aria-label')||'')).toLowerCase();
+                        if (meta.includes('due') && !meta.includes('question')
+                            && !meta.includes('contract') && !meta.includes('start')
+                            && !meta.includes('end')) {
+                          return val;
+                        }
+                      }
+                      // 2) Fallback: label text sitting before the input.
+                      for (const inp of inputs) {
+                        const val = (inp.value || '').trim();
+                        if (!dateRe.test(val)) continue;
+                        let label = '', el = inp;
+                        for (let i = 0; i < 6 && el; i++) {
+                          el = el.previousElementSibling || el.parentElement;
+                          if (el && el.innerText) { label = el.innerText.trim().slice(0,60); if (label) break; }
+                        }
+                        const L = label.toLowerCase();
+                        if (L.includes('due date') && !L.includes('questions')
+                            && !L.includes('contract')) return val;
+                      }
+                      return '';
+                    }
+                """)
+                m = re.match(r"(\d{1,2}/\d{1,2}/\d{2,4})", due_str or "")
+                if _diag_detail:
+                    print(f"[PASSPort DETAIL] {item['title'][:40]!r} "
+                          f"due_input={due_str!r}")
                 if m:
                     item["due"] = m.group(1)
                     item["date"] = m.group(1)
@@ -276,9 +323,9 @@ async def scrape_passport(pw) -> list[dict]:
                         due_date = _dt.date(yy, mm, dd)
                     except ValueError:
                         due_date = None
-            except Exception:
-                pass  # if the detail page won't load, keep it (fail open)
-            # Drop only when we positively know the due date is past.
+            except Exception as e:
+                if _diag_detail:
+                    print(f"[PASSPort DETAIL] {item['title'][:40]!r} ERROR {e}")
             if due_date is not None and due_date < today:
                 continue
             kept.append(item)

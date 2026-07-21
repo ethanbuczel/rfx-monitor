@@ -62,16 +62,19 @@ SOURCE_WESTCHESTER = "Westchester"   # digest section for Westchester bids
 # pattern; a wrong slug just yields 0 and prints an error — it can't break the
 # others.
 WESTCHESTER_BIDNET = [
+    # Confirmed working (page loads on BidNet):
     ("Westchester County",        "westchester-county-purchasing"),
     ("Westchester County DPW",    "westchester-county-public-works"),
     ("Village of Mamaroneck",     "villageofmamaroneck"),
     ("Town of Mamaroneck",        "townofmamaroneck"),
-    ("City of Yonkers",           "cityofyonkers"),
-    ("City of New Rochelle",      "cityofnewrochelle"),
     ("City of White Plains",      "cityofwhiteplains"),
-    ("City of Mount Vernon",      "cityofmountvernon"),
-    ("Village of Port Chester",   "villageofportchester"),
-    ("Town of Greenburgh",        "townofgreenburgh"),
+    ("Port Chester IDA",          "portchesternyida"),
+    # NOTE: Yonkers, New Rochelle, Mount Vernon, Village of Port Chester, and
+    # Greenburgh all use BidNet too, but their exact URL slugs 404'd (BidNet's
+    # naming isn't consistent — e.g. it's not "cityofyonkers"). They were
+    # removed rather than error every run. To re-add one: find its real slug at
+    # bidnetdirect.com/new-york/participating-buyers, confirm the page loads,
+    # then add ("Name", "slug") here.
 ]
 
 
@@ -108,6 +111,68 @@ def scrape_bidnet_agency(name: str, slug: str, source: str) -> list[dict]:
                                   due=due, extra=row_text[:120]))
     except Exception as e:
         print(f"[{name}] Error: {e}")
+    import os as _os
+    if _os.environ.get("DIAG"):
+        print(f"[Westchester DIAG] {name}: {len(out)} match(es) from {url}")
+    return out
+
+
+def scrape_westchester_county_portal() -> list[dict]:
+    """Westchester County's OWN RFP portal (rfp.westchestergov.com) — a
+    separate, official feed from BidNet that carries County RFPs (including
+    transportation/transit work) that may not appear on BidNet. Clean table:
+    each posting has a 'TYPE : Title' header, description, and Due Date."""
+    out = []
+    url = "https://rfp.westchestergov.com/rfp/rfps"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=25)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        import datetime as _dt
+        today = _dt.date.today()
+
+        for cell in soup.find_all("td"):
+            text = cell.get_text(" ", strip=True)
+            if not text or "Due Date" not in text:
+                continue
+            # Title is the leading "REQUEST FOR ... : <name>" up to the first
+            # sentence/description break.
+            title = ""
+            b = cell.find(["b", "strong"])
+            if b:
+                title = b.get_text(" ", strip=True)
+            if not title:
+                m = re.match(r"(REQUEST FOR [A-Z ]+:\s*[^.]{5,120})", text)
+                title = m.group(1).strip() if m else text[:120]
+            title = re.sub(r"\s+", " ", title).strip()
+
+            # Due date
+            dm = re.search(
+                r"Due Date\s*:?\s*"
+                r"([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})", text)
+            due = "Unknown"
+            keep_date = True
+            if dm:
+                due = dm.group(1)
+                try:
+                    d = _dt.datetime.strptime(due, "%b %d, %Y").date()
+                    if d < today:
+                        keep_date = False   # expired (portal keeps old ones)
+                except ValueError:
+                    pass
+            if not keep_date:
+                continue
+
+            if matches(title) or matches(text):
+                out.append(result(SOURCE_WESTCHESTER, "Westchester County",
+                                  title, url, due=due))
+    except Exception as e:
+        print(f"[Westchester County Portal] Error: {e}")
+
+    import os as _os
+    if _os.environ.get("DIAG"):
+        print(f"[Westchester DIAG] County Portal: {len(out)} match(es) from {url}")
     return out
 
 
@@ -115,6 +180,7 @@ def scrape_westchester_all() -> list[dict]:
     out = []
     for name, slug in WESTCHESTER_BIDNET:
         out += scrape_bidnet_agency(name, slug, SOURCE_WESTCHESTER)
+    out += scrape_westchester_county_portal()
     return out
 
 

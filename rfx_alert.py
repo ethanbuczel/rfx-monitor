@@ -543,14 +543,15 @@ def build_html(results: list[dict]) -> str:
     if not results:
         return "<p>No matching RFx opportunities found this run.</p>"
 
-    by_source: dict[str, list[dict]] = {}
-    for r in results:
-        by_source.setdefault(r["source"], []).append(r)
-
     new_total = sum(1 for r in results if r.get("is_new"))
-    summary = (f"{len(results)} open opportunities across {len(by_source)} sources"
-               + (f" &mdash; <b>{new_total} new since last run</b>." if new_total
-                  else "."))
+    n_relevant = sum(1 for r in results
+                     if r.get("relevance") == "relevant" or r.get("relevance") is None)
+    n_filtered = len(results) - n_relevant
+    summary = (f"<b>{n_relevant} potential contract"
+               + ("s" if n_relevant != 1 else "") + "</b>"
+               + (f" &mdash; {new_total} new since last run" if new_total else "")
+               + (f". <span style='color:#868e96'>{n_filtered} filtered to "
+                  f"'Not Design Work' below.</span>" if n_filtered else "."))
     parts = [f"<h2>RFx digest — {dt.date.today():%B %d, %Y}</h2>",
              f"<p>{summary}</p>"]
 
@@ -610,13 +611,28 @@ def build_html(results: list[dict]) -> str:
                 pass
         return _dt.date.max
 
+    # Split by classifier verdict: "relevant" items go in the main view; both
+    # "not_relevant" and "unknown" get tucked into ONE collapsed section at the
+    # bottom (still checkable, but out of the way). Items the classifier never
+    # ran on (no 'relevance' key at all) stay in the main view so nothing
+    # silently disappears if classification is off/failed.
+    def _is_main(it: dict) -> bool:
+        rel = it.get("relevance")
+        return rel == "relevant" or rel is None
+
+    main_by_source: dict[str, list[dict]] = {}
+    aside_items: list[dict] = []
+    for r in results:
+        if _is_main(r):
+            main_by_source.setdefault(r["source"], []).append(r)
+        else:
+            aside_items.append(r)
+
+    # ── Main view: relevant opportunities, grouped by source ──
     # Sections alphabetical, but always push "Future RFPs" to the very bottom.
     def _section_order(kv):
         return (kv[0] == "Future RFPs", kv[0])
-    for source, items in sorted(by_source.items(), key=_section_order):
-        # Sort by soonest due date first; undated items fall to the bottom.
-        # (NEW items keep their badge/highlight but no longer force to top —
-        # due-date urgency is the primary ordering.)
+    for source, items in sorted(main_by_source.items(), key=_section_order):
         items.sort(key=_due_sort_key)
         n_new = sum(1 for x in items if x.get("is_new"))
         head = f"{source} ({len(items)}"
@@ -635,6 +651,39 @@ def build_html(results: list[dict]) -> str:
             parts.append(f"<li{style}>{tag}{link}<br><small>{meta}"
                          f"{status_tag(it)}</small></li>")
         parts.append("</ul>")
+
+    # ── Collapsed "Not Design Work" section: unrelated + unknown ──
+    if aside_items:
+        aside_items.sort(key=lambda it: (it.get("source", ""),
+                                         _due_sort_key(it)))
+        n_unrel = sum(1 for x in aside_items if x.get("relevance") == "not_relevant")
+        n_unk = sum(1 for x in aside_items if x.get("relevance") == "unknown")
+        label = f"Not Design Work — {len(aside_items)} filtered out"
+        detail = []
+        if n_unrel:
+            detail.append(f"{n_unrel} unrelated")
+        if n_unk:
+            detail.append(f"{n_unk} unknown")
+        sub = f" ({', '.join(detail)})" if detail else ""
+        parts.append("<hr style='margin:20px 0 8px'>")
+        # <details> renders as a native collapsible dropdown in most modern mail
+        # clients/browsers; where unsupported it just shows expanded, which is a
+        # safe fallback.
+        parts.append("<details style='margin-top:4px'>")
+        parts.append(
+            f"<summary style='cursor:pointer;color:#868e96;font-size:14px;"
+            f"font-weight:bold'>{label}{sub} &mdash; click to expand</summary>")
+        parts.append("<ul style='margin-top:6px'>")
+        for it in aside_items:
+            link = (f"<a href='{it['url']}'>{it['title']}</a>"
+                    if it["url"] else it["title"])
+            meta = " &middot; ".join(x for x in [it["source"], it["agency"],
+                                                 f"Due: {it.get('due', 'Unknown')}"]
+                                     if x)
+            parts.append(f"<li style='color:#868e96'>{link}<br>"
+                         f"<small>{meta}{status_tag(it)}</small></li>")
+        parts.append("</ul></details>")
+
     return "\n".join(parts)
 
 

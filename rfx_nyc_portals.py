@@ -250,18 +250,6 @@ async def scrape_suny(pw, diag: bool = False) -> list[dict]:
     return out
 
 
-async def _guard(coro, name: str, limit: int):
-    """Hard time cap per scraper so a hang can't freeze the whole job."""
-    try:
-        return await asyncio.wait_for(coro, timeout=limit)
-    except asyncio.TimeoutError:
-        print(f"[{name}] hard-timeout after {limit}s — skipping")
-        return []
-    except Exception as e:
-        print(f"[{name}] error: {e}")
-        return []
-
-
 async def _fetch_all(diag: bool = False) -> list[dict]:
     # NOTE: NYC DDC was dropped — its DDC Anywhere portal loads the project
     # list via JS that Playwright couldn't reach (only the nav shell rendered),
@@ -270,8 +258,8 @@ async def _fetch_all(diag: bool = False) -> list[dict]:
     # scrape_ddc() is kept in the file for reference but no longer called.
     async with async_playwright() as pw:
         edc, suny = await asyncio.gather(
-            _guard(scrape_edc(pw, diag=diag), "EDC", 75),
-            _guard(scrape_suny(pw, diag=diag), "SUNY", 75),
+            scrape_edc(pw, diag=diag),
+            scrape_suny(pw, diag=diag),
         )
     return edc + suny
 

@@ -655,29 +655,44 @@ def build_html(results: list[dict]) -> str:
     # this is a clean, clearly-separated, dimmed block instead: always visible
     # but obviously the "skip me" pile, easy to scroll past.
     if aside_items:
-        aside_items.sort(key=lambda it: (it.get("source", ""),
+        # Sort NEW items to the top of the block, then by source/due — so newly
+        # appeared filtered items are easy to spot rather than buried.
+        aside_items.sort(key=lambda it: (not it.get("is_new"),
+                                         it.get("source", ""),
                                          _due_sort_key(it)))
+        n_aside_new = sum(1 for x in aside_items if x.get("is_new"))
+        new_hdr = (f" <span style='color:#f08c00'>&mdash; {n_aside_new} new</span>"
+                   if n_aside_new else "")
         parts.append("<hr style='margin:26px 0 6px;border:0;"
                      "border-top:2px solid #dee2e6'>")
         parts.append(
             f"<div style='color:#adb5bd;font-size:13px;font-weight:bold;"
             f"text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px'>"
-            f"Not Design Work &mdash; {len(aside_items)} filtered out</div>")
+            f"Not Design Work &mdash; {len(aside_items)} filtered out{new_hdr}"
+            f"</div>")
         parts.append(
             "<div style='color:#adb5bd;font-size:12px;margin-bottom:8px'>"
             "Contractor / no-design-scope work, set aside. Skim if you want to "
             "double-check.</div>")
         parts.append("<ul style='margin-top:0'>")
         for it in aside_items:
-            link = (f"<a href='{it['url']}' style='color:#868e96'>{it['title']}</a>"
-                    if it["url"] else it["title"])
+            is_new = it.get("is_new")
+            # NEW items stay legible (darker gray + orange NEW badge + tint) so
+            # they stand out from the dimmed pile; older filtered items stay
+            # faint.
+            row_color = "#495057" if is_new else "#adb5bd"
+            link = (f"<a href='{it['url']}' style='color:{row_color}'>"
+                    f"{it['title']}</a>" if it["url"] else it["title"])
             meta = " &middot; ".join(x for x in [it["source"], it["agency"],
                                                  f"Due: {it.get('due', 'Unknown')}"]
                                      if x)
             reason = it.get("relevance_reason") or ""
             reason_html = (f" <span style='color:#adb5bd'>&mdash; {reason}</span>"
                            if reason else "")
-            parts.append(f"<li style='color:#adb5bd'>{link}<br>"
+            new_badge = (badge if is_new else "")
+            li_style = (f"color:{row_color};"
+                        + ("background:#fff4e6;padding:2px 4px;" if is_new else ""))
+            parts.append(f"<li style='{li_style}'>{new_badge}{link}<br>"
                          f"<small>{meta}{reason_html}</small></li>")
         parts.append("</ul>")
 

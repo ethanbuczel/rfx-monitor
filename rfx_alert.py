@@ -544,11 +544,9 @@ def build_html(results: list[dict]) -> str:
         return "<p>No matching RFx opportunities found this run.</p>"
 
     new_total = sum(1 for r in results if r.get("is_new"))
-    n_relevant = sum(1 for r in results
-                     if r.get("relevance") == "relevant" or r.get("relevance") is None)
-    n_filtered = len(results) - n_relevant
-    summary = (f"<b>{n_relevant} potential contract"
-               + ("s" if n_relevant != 1 else "") + "</b>"
+    n_filtered = sum(1 for r in results if r.get("relevance") == "not_relevant")
+    n_main = len(results) - n_filtered
+    summary = (f"<b>{n_main} opportunit" + ("y" if n_main == 1 else "ies") + "</b>"
                + (f" &mdash; {new_total} new since last run" if new_total else "")
                + (f". <span style='color:#868e96'>{n_filtered} filtered to "
                   f"'Not Design Work' below.</span>" if n_filtered else "."))
@@ -611,14 +609,13 @@ def build_html(results: list[dict]) -> str:
                 pass
         return _dt.date.max
 
-    # Split by classifier verdict: "relevant" items go in the main view; both
-    # "not_relevant" and "unknown" get tucked into ONE collapsed section at the
-    # bottom (still checkable, but out of the way). Items the classifier never
-    # ran on (no 'relevance' key at all) stay in the main view so nothing
-    # silently disappears if classification is off/failed.
+    # Split by classifier verdict: "relevant" AND "unknown" items go in the
+    # main view (unknown often = real design work the classifier just couldn't
+    # confirm from a title-only source like MTA — burying those would hide real
+    # contracts). Only clearly "not_relevant" contractor/no-design work is moved
+    # to the bottom block. Items the classifier never ran on stay in main too.
     def _is_main(it: dict) -> bool:
-        rel = it.get("relevance")
-        return rel == "relevant" or rel is None
+        return it.get("relevance") != "not_relevant"
 
     main_by_source: dict[str, list[dict]] = {}
     aside_items: list[dict] = []
@@ -652,37 +649,37 @@ def build_html(results: list[dict]) -> str:
                          f"{status_tag(it)}</small></li>")
         parts.append("</ul>")
 
-    # ── Collapsed "Not Design Work" section: unrelated + unknown ──
+    # ── "Not Design Work" block: unrelated contractor/no-design work ──
+    # NOTE: a true collapsible dropdown (<details>) doesn't work in Outlook —
+    # it strips the interactivity and shows it expanded with a dead toggle. So
+    # this is a clean, clearly-separated, dimmed block instead: always visible
+    # but obviously the "skip me" pile, easy to scroll past.
     if aside_items:
         aside_items.sort(key=lambda it: (it.get("source", ""),
                                          _due_sort_key(it)))
-        n_unrel = sum(1 for x in aside_items if x.get("relevance") == "not_relevant")
-        n_unk = sum(1 for x in aside_items if x.get("relevance") == "unknown")
-        label = f"Not Design Work — {len(aside_items)} filtered out"
-        detail = []
-        if n_unrel:
-            detail.append(f"{n_unrel} unrelated")
-        if n_unk:
-            detail.append(f"{n_unk} unknown")
-        sub = f" ({', '.join(detail)})" if detail else ""
-        parts.append("<hr style='margin:20px 0 8px'>")
-        # <details> renders as a native collapsible dropdown in most modern mail
-        # clients/browsers; where unsupported it just shows expanded, which is a
-        # safe fallback.
-        parts.append("<details style='margin-top:4px'>")
+        parts.append("<hr style='margin:26px 0 6px;border:0;"
+                     "border-top:2px solid #dee2e6'>")
         parts.append(
-            f"<summary style='cursor:pointer;color:#868e96;font-size:14px;"
-            f"font-weight:bold'>{label}{sub} &mdash; click to expand</summary>")
-        parts.append("<ul style='margin-top:6px'>")
+            f"<div style='color:#adb5bd;font-size:13px;font-weight:bold;"
+            f"text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px'>"
+            f"Not Design Work &mdash; {len(aside_items)} filtered out</div>")
+        parts.append(
+            "<div style='color:#adb5bd;font-size:12px;margin-bottom:8px'>"
+            "Contractor / no-design-scope work, set aside. Skim if you want to "
+            "double-check.</div>")
+        parts.append("<ul style='margin-top:0'>")
         for it in aside_items:
-            link = (f"<a href='{it['url']}'>{it['title']}</a>"
+            link = (f"<a href='{it['url']}' style='color:#868e96'>{it['title']}</a>"
                     if it["url"] else it["title"])
             meta = " &middot; ".join(x for x in [it["source"], it["agency"],
                                                  f"Due: {it.get('due', 'Unknown')}"]
                                      if x)
-            parts.append(f"<li style='color:#868e96'>{link}<br>"
-                         f"<small>{meta}{status_tag(it)}</small></li>")
-        parts.append("</ul></details>")
+            reason = it.get("relevance_reason") or ""
+            reason_html = (f" <span style='color:#adb5bd'>&mdash; {reason}</span>"
+                           if reason else "")
+            parts.append(f"<li style='color:#adb5bd'>{link}<br>"
+                         f"<small>{meta}{reason_html}</small></li>")
+        parts.append("</ul>")
 
     return "\n".join(parts)
 

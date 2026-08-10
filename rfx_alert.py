@@ -760,6 +760,14 @@ def main() -> None:
     except Exception as e:
         print(f"[future] module error (continuing without it): {e}")
 
+    # Experimental NYC-portal sources (DDC / EDC / SUNY-JAGGAER) — running
+    # alongside CROL to compare coverage. Remove if they prove fully duplicative.
+    try:
+        from rfx_nyc_portals import get_nyc_portal_results
+        all_results += get_nyc_portal_results()
+    except Exception as e:
+        print(f"[nyc portals] module error (continuing without it): {e}")
+
     # Final dedup by (title, url).
     seen, deduped = set(), []
     for r in all_results:

@@ -292,19 +292,16 @@ async def scrape_passport(pw) -> list[dict]:
         for item in results:
             due_date = None
             try:
-                await page.goto(item["url"], timeout=25000,
+                await page.goto(item["url"], timeout=15000,
                                 wait_until="domcontentloaded")
-                # Key Dates render via JS after load — wait for network to
-                # settle and for the "Due Date" label to actually appear.
+                # Key Dates render via JS after load. Keep these waits TIGHT —
+                # with ~30 items, generous per-item waits can blow the whole
+                # job's time budget. Short waits + fail-open is the right trade.
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=12000)
+                    await page.wait_for_selector("input", timeout=5000)
                 except Exception:
                     pass
-                try:
-                    await page.wait_for_selector("text=/Due Date/i", timeout=8000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(800)
+                await page.wait_for_timeout(400)
 
                 # The dates live in INPUT field values (the body text only shows
                 # the "(M/d/yyyy)" placeholder labels). Find the input whose
@@ -480,17 +477,28 @@ async def scrape_nassau(pw) -> list[dict]:
 
 # ─── Runner ───────────────────────────────────────────────────────────────────
 
+async def _guard(coro, name: str, limit: int):
+    """Run a scraper with a hard time cap. If it exceeds `limit` seconds it's
+    cancelled and returns [] — so one slow/hanging source can never freeze the
+    whole job (which was causing ~10-minute runner-timeout failures)."""
+    try:
+        return await asyncio.wait_for(coro, timeout=limit)
+    except asyncio.TimeoutError:
+        print(f"[{name}] hard-timeout after {limit}s — skipping")
+        return []
+    except Exception as e:
+        print(f"[{name}] error: {e}")
+        return []
+
+
 async def fetch_all_playwright() -> list[dict]:
-    """Call the Playwright scrapers and return combined results.
-    NOTE: Suffolk County is no longer scraped here — the old scrape_suffolk hit
-    an informational DPW page and returned nav links ('Highway Maintenance',
-    etc.), not bids. Suffolk County's real open bids are on BidNet and are now
-    handled by scrape_suffolk_county() in rfx_suffolk_towns.py."""
+    """Call the Playwright scrapers and return combined results. Each scraper is
+    wrapped in a hard timeout so no single source can hang the entire run."""
     async with async_playwright() as pw:
         bonfire, passport, nassau = await asyncio.gather(
-            scrape_bonfire(pw),
-            scrape_passport(pw),
-            scrape_nassau(pw),
+            _guard(scrape_bonfire(pw), "Bonfire", 90),
+            _guard(scrape_passport(pw), "PASSPort", 240),
+            _guard(scrape_nassau(pw), "Nassau", 90),
         )
     all_results = bonfire + passport + nassau
     print(f"[Playwright] Bonfire: {len(bonfire)} | PASSPort: {len(passport)} | "

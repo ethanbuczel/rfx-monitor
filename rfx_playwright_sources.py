@@ -44,10 +44,42 @@ async def scrape_bonfire(pw) -> list[dict]:
     )
     page = await ctx.new_page()
     try:
-        await page.goto("https://panynj.bonfirehub.com/opportunities", timeout=30000)
-        # Wait for opportunity cards to load
-        await page.wait_for_selector("div.opportunity-card, div.opportunity-list-item, article", timeout=20000)
-        await page.wait_for_timeout(2000)  # let any lazy-load settle
+        await page.goto("https://panynj.bonfirehub.com/opportunities", timeout=35000)
+        # Bonfire changed its markup before; don't HARD-fail on one selector.
+        # Wait for network to settle, then probe several possible containers.
+        try:
+            await page.wait_for_load_state("networkidle", timeout=20000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(2500)
+        for sel in ("div.opportunity-card", "div[class*='opportunity']",
+                    "table tr", "a[href*='/opportunities/']",
+                    "[class*='card']", "[role='row']"):
+            try:
+                await page.wait_for_selector(sel, timeout=5000)
+                break
+            except Exception:
+                continue
+        await page.wait_for_timeout(1500)
+
+        import os as _os
+        if _os.environ.get("DIAG"):
+            body = await page.inner_text("body")
+            print(f"[Bonfire DIAG] body_chars={len(body)}")
+            for sel in ("div.opportunity-card", "div[class*='opportunity']",
+                        "table", "table tr", "a[href*='/opportunities/']",
+                        "[class*='card']", "[role='row']", "h2", "h3"):
+                els = await page.query_selector_all(sel)
+                if els:
+                    print(f"[Bonfire DIAG] {sel!r}: {len(els)}")
+            # Dump the first several opportunity-ish links
+            links = await page.query_selector_all("a[href*='opportunit']")
+            print(f"[Bonfire DIAG] opportunity links: {len(links)}")
+            for lk in links[:12]:
+                t = (await lk.inner_text()).strip().replace("\n", " ")
+                h = await lk.get_attribute("href") or ""
+                if len(t) >= 3:
+                    print(f"    {t[:70]!r} -> {h[:70]}")
 
         # Try multiple possible card selectors Bonfire uses
         cards = await page.query_selector_all("div.opportunity-card")

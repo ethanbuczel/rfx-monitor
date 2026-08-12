@@ -55,6 +55,33 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
         except Exception:
             pass
         await page.wait_for_timeout(2500)
+
+        # Tab-based portals (e.g. Suffolk's ?tab=openOpportunities) sometimes
+        # render the list only after the "Open Opportunities" tab is clicked
+        # and need extra time for the table to populate. Try clicking it, then
+        # wait longer. Harmless on portals that don't have the tab.
+        for tab_txt in ("Open Opportunities", "Open Opportunity",
+                        "Opportunities"):
+            try:
+                tab = await page.query_selector(f"text=/{tab_txt}/i")
+                if tab:
+                    await tab.click()
+                    await page.wait_for_timeout(3000)
+                    break
+            except Exception:
+                continue
+        # Wait for the table to actually fill in (more than the near-empty
+        # shell). Retry a few times giving it time to render row content.
+        for _ in range(4):
+            rows_now = await page.query_selector_all("table tr")
+            filled = False
+            for rr in rows_now:
+                if len((await rr.inner_text()).strip()) > 40:
+                    filled = True
+                    break
+            if filled:
+                break
+            await page.wait_for_timeout(2500)
         for sel in ("table tr", "a[href*='/opportunities/']",
                     "div[class*='opportunity']", "[role='row']"):
             try:
@@ -91,23 +118,42 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
                 href = base_url + href
             cells = await row.query_selector_all("td")
             texts = [((await c.inner_text()).strip()) for c in cells]
+            full = " ".join(t for t in texts if t)
+            # If the row's cells are empty (some Bonfire portals render the
+            # title outside <td>), fall back to the row's whole inner_text and
+            # the link's aria-label/title attributes.
+            if len(full) < 15:
+                full = re.sub(r"\s+", " ", (await row.inner_text()).strip())
+            if len(full) < 15:
+                aria = (await link.get_attribute("aria-label")) or ""
+                titl = (await link.get_attribute("title")) or ""
+                full = f"{aria} {titl}".strip()
             cand = [t for t in texts
                     if t and t.lower() not in ("view opportunity", "view", "open")]
-            if not cand:
-                continue
-            title = max(cand, key=len)
-            full = " ".join(texts)
+            title = max(cand, key=len) if cand else full
+            title = re.sub(r"\bview opportunity\b", "", title,
+                           flags=re.I).strip()
             dm = re.search(
                 r"(\d{1,2}/\d{1,2}/\d{2,4}"
                 r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s+\d{4})", full)
             date = dm.group(1) if dm else ""
-            if title and keyword_match(full):
+            if title and len(title) > 4 and keyword_match(full):
                 results.append({
                     "title": title[:200],
                     "agency": source,
                     "date": date,
                     "url": href or portal_url,
                 })
+
+        if _os.environ.get("DIAG"):
+            print(f"[{diag_tag} DIAG] matched={len(results)}; row samples:")
+            shown = 0
+            for row in rows:
+                lk = await row.query_selector("a[href*='/opportunities/']")
+                if lk and shown < 6:
+                    rt = re.sub(r"\s+", " ", (await row.inner_text()).strip())
+                    print(f"    row[{shown}] {rt[:110]!r}")
+                    shown += 1
     except PWTimeout:
         print(f"[{diag_tag}] Timed out waiting for content")
     except Exception as e:

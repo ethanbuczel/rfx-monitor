@@ -26,7 +26,6 @@ jobs:
 
       - name: Run RFx digest
         env:
-          DIAG: "1"
           SAM_API_KEY: ${{ secrets.SAM_API_KEY }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}

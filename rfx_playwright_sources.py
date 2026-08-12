@@ -35,7 +35,12 @@ def keyword_match(text: str) -> bool:
 
 # ─── 1. PANYNJ Bonfire ────────────────────────────────────────────────────────
 
-async def scrape_bonfire(pw) -> list[dict]:
+async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
+                                 source: str, diag_tag: str) -> list[dict]:
+    """Generic Bonfire scraper. Bonfire portals (PANYNJ, Suffolk County, etc.)
+    all share the same table layout: each row has a 'View Opportunity' link plus
+    cells holding the title, ref#, and close date. Parse rows that contain an
+    /opportunities/ link."""
     results = []
     browser = await pw.chromium.launch(headless=True)
     ctx = await browser.new_context(
@@ -44,17 +49,14 @@ async def scrape_bonfire(pw) -> list[dict]:
     )
     page = await ctx.new_page()
     try:
-        await page.goto("https://panynj.bonfirehub.com/opportunities", timeout=35000)
-        # Bonfire changed its markup before; don't HARD-fail on one selector.
-        # Wait for network to settle, then probe several possible containers.
+        await page.goto(portal_url, timeout=35000)
         try:
             await page.wait_for_load_state("networkidle", timeout=20000)
         except Exception:
             pass
         await page.wait_for_timeout(2500)
-        for sel in ("div.opportunity-card", "div[class*='opportunity']",
-                    "table tr", "a[href*='/opportunities/']",
-                    "[class*='card']", "[role='row']"):
+        for sel in ("table tr", "a[href*='/opportunities/']",
+                    "div[class*='opportunity']", "[role='row']"):
             try:
                 await page.wait_for_selector(sel, timeout=5000)
                 break
@@ -65,68 +67,76 @@ async def scrape_bonfire(pw) -> list[dict]:
         import os as _os
         if _os.environ.get("DIAG"):
             body = await page.inner_text("body")
-            print(f"[Bonfire DIAG] body_chars={len(body)}")
-            for sel in ("div.opportunity-card", "div[class*='opportunity']",
-                        "table", "table tr", "a[href*='/opportunities/']",
-                        "[class*='card']", "[role='row']", "h2", "h3"):
+            print(f"[{diag_tag} DIAG] body_chars={len(body)}")
+            for sel in ("table", "table tr", "a[href*='/opportunities/']",
+                        "div[class*='opportunity']", "[role='row']"):
                 els = await page.query_selector_all(sel)
                 if els:
-                    print(f"[Bonfire DIAG] {sel!r}: {len(els)}")
-            # Dump the first several opportunity-ish links
+                    print(f"[{diag_tag} DIAG] {sel!r}: {len(els)}")
             links = await page.query_selector_all("a[href*='opportunit']")
-            print(f"[Bonfire DIAG] opportunity links: {len(links)}")
+            print(f"[{diag_tag} DIAG] opportunity links: {len(links)}")
             for lk in links[:12]:
                 t = (await lk.inner_text()).strip().replace("\n", " ")
                 h = await lk.get_attribute("href") or ""
                 if len(t) >= 3:
                     print(f"    {t[:70]!r} -> {h[:70]}")
 
-        # Try multiple possible card selectors Bonfire uses
-        cards = await page.query_selector_all("div.opportunity-card")
-        if not cards:
-            cards = await page.query_selector_all("div[class*='opportunity']")
-
-        for card in cards:
-            title_el = await card.query_selector("h2, h3, .title, [class*='title']")
-            title = (await title_el.inner_text()).strip() if title_el else ""
-            link_el = await card.query_selector("a")
-            href = await link_el.get_attribute("href") if link_el else ""
+        rows = await page.query_selector_all("table tr")
+        for row in rows:
+            link = await row.query_selector("a[href*='/opportunities/']")
+            if not link:
+                continue
+            href = await link.get_attribute("href") or ""
             if href and not href.startswith("http"):
-                href = "https://panynj.bonfirehub.com" + href
-            date_el = await card.query_selector("[class*='date'], [class*='close'], time")
-            date = (await date_el.inner_text()).strip() if date_el else ""
-
-            if title and keyword_match(title):
+                href = base_url + href
+            cells = await row.query_selector_all("td")
+            texts = [((await c.inner_text()).strip()) for c in cells]
+            cand = [t for t in texts
+                    if t and t.lower() not in ("view opportunity", "view", "open")]
+            if not cand:
+                continue
+            title = max(cand, key=len)
+            full = " ".join(texts)
+            dm = re.search(
+                r"(\d{1,2}/\d{1,2}/\d{2,4}"
+                r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s+\d{4})", full)
+            date = dm.group(1) if dm else ""
+            if title and keyword_match(full):
                 results.append({
-                    "title": title,
-                    "agency": "PANYNJ Bonfire",
+                    "title": title[:200],
+                    "agency": source,
                     "date": date,
-                    "url": href or "https://panynj.bonfirehub.com/opportunities"
+                    "url": href or portal_url,
                 })
-
-        # Fallback: grab all text links if card parsing got nothing
-        if not results:
-            links = await page.query_selector_all("a[href*='/opportunities/']")
-            for link in links:
-                text = (await link.inner_text()).strip()
-                href = await link.get_attribute("href") or ""
-                if not href.startswith("http"):
-                    href = "https://panynj.bonfirehub.com" + href
-                if text and keyword_match(text):
-                    results.append({
-                        "title": text,
-                        "agency": "PANYNJ Bonfire",
-                        "date": "",
-                        "url": href
-                    })
-
     except PWTimeout:
-        print("[Bonfire] Timed out waiting for content")
+        print(f"[{diag_tag}] Timed out waiting for content")
     except Exception as e:
-        print(f"[Bonfire] Error: {e}")
+        print(f"[{diag_tag}] Error: {e}")
     finally:
         await browser.close()
     return results
+
+
+async def scrape_bonfire(pw) -> list[dict]:
+    """PANYNJ (Port Authority) Bonfire portal."""
+    return await _scrape_bonfire_portal(
+        pw,
+        portal_url="https://panynj.bonfirehub.com/opportunities",
+        base_url="https://panynj.bonfirehub.com",
+        source="PANYNJ Bonfire",
+        diag_tag="Bonfire")
+
+
+async def scrape_suffolk_bonfire(pw) -> list[dict]:
+    """Suffolk County's own Bonfire portal — separate from BidNet. Tagged as its
+    own source so we can see in the digest whether it surfaces professional-
+    services RFPs that BidNet misses. Dedup collapses any true overlap."""
+    return await _scrape_bonfire_portal(
+        pw,
+        portal_url="https://suffolkcountyny.bonfirehub.com/portal/?tab=openOpportunities",
+        base_url="https://suffolkcountyny.bonfirehub.com",
+        source="Suffolk County Bonfire",
+        diag_tag="SuffolkBonfire")
 
 
 # ─── 2. NYC PASSPort ──────────────────────────────────────────────────────────
@@ -487,14 +497,15 @@ async def fetch_all_playwright() -> list[dict]:
     etc.), not bids. Suffolk County's real open bids are on BidNet and are now
     handled by scrape_suffolk_county() in rfx_suffolk_towns.py."""
     async with async_playwright() as pw:
-        bonfire, passport, nassau = await asyncio.gather(
+        bonfire, passport, nassau, suffolk_bf = await asyncio.gather(
             scrape_bonfire(pw),
             scrape_passport(pw),
             scrape_nassau(pw),
+            scrape_suffolk_bonfire(pw),
         )
-    all_results = bonfire + passport + nassau
+    all_results = bonfire + passport + nassau + suffolk_bf
     print(f"[Playwright] Bonfire: {len(bonfire)} | PASSPort: {len(passport)} | "
-          f"Nassau: {len(nassau)}")
+          f"Nassau: {len(nassau)} | SuffolkBonfire: {len(suffolk_bf)}")
     return all_results
 
 
@@ -508,6 +519,7 @@ def get_playwright_results() -> list[dict]:
         "PANYNJ Bonfire": "PANYNJ Bonfire",
         "NYC PASSPort": "NYC PASSPort",
         "Suffolk County DPW": "Suffolk County DPW",
+        "Suffolk County Bonfire": "Suffolk County Bonfire",
         "Nassau County": "Nassau County",
     }
     for r in rows:

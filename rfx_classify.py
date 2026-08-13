@@ -74,10 +74,60 @@ SHARED_LISTING_URLS = (
 )
 
 
+def _extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Extract text from a PDF's bytes by writing to a TEMP file, reading it,
+    and deleting it (nothing is kept on disk or committed to the repo). Tries
+    pypdf, then pdfplumber, then the pdftotext CLI — whichever is available.
+    Returns "" if none work."""
+    import tempfile, os as _os, subprocess
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+            tf.write(pdf_bytes)
+            tmp_path = tf.name
+
+        # 1) pypdf (pure-python, most portable)
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(tmp_path)
+            text = " ".join((pg.extract_text() or "") for pg in reader.pages)
+            if text.strip():
+                return re.sub(r"\s+", " ", text).strip()
+        except Exception:
+            pass
+        # 2) pdfplumber
+        try:
+            import pdfplumber
+            with pdfplumber.open(tmp_path) as pdf:
+                text = " ".join((pg.extract_text() or "") for pg in pdf.pages)
+            if text.strip():
+                return re.sub(r"\s+", " ", text).strip()
+        except Exception:
+            pass
+        # 3) pdftotext CLI
+        try:
+            out = subprocess.run(["pdftotext", "-layout", tmp_path, "-"],
+                                 capture_output=True, timeout=25)
+            text = out.stdout.decode("utf-8", "ignore")
+            if text.strip():
+                return re.sub(r"\s+", " ", text).strip()
+        except Exception:
+            pass
+        return ""
+    finally:
+        if tmp_path:
+            try:
+                _os.remove(tmp_path)   # discard — never kept
+            except Exception:
+                pass
+
+
 def _fetch_detail_text(url: str) -> str:
     """Best-effort fetch of an opportunity's detail page. Returns plain text,
-    or "" on any failure. PDFs and JS-heavy portals will often yield little —
-    that's fine, the classifier falls back to the title."""
+    or "" on any failure. Handles both HTML detail pages and PDF ads/RFPs:
+    PDFs are downloaded to a temp file, text-extracted, and the file discarded.
+    JS-heavy portals may still yield little — the classifier falls back to the
+    title in that case."""
     if not url or not url.startswith("http"):
         return ""
     # Don't fetch shared listing pages — they return every opportunity at once,
@@ -89,10 +139,9 @@ def _fetch_detail_text(url: str) -> str:
         if r.status_code != 200:
             return ""
         ctype = r.headers.get("Content-Type", "").lower()
-        if "pdf" in ctype:
-            # Don't parse PDFs here (keeps deps light); signal it's a PDF so the
-            # LLM knows to lean on the title.
-            return ""
+        # PDF ads/RFPs (common on NYSCR): download to temp, extract, discard.
+        if "pdf" in ctype or url.lower().endswith(".pdf"):
+            return _extract_pdf_text(r.content)[:MAX_TEXT_CHARS]
         try:
             from bs4 import BeautifulSoup
             text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
@@ -104,10 +153,12 @@ def _fetch_detail_text(url: str) -> str:
         return ""
 
 
-def _classify_one(item: dict, api_key: str) -> tuple[str, str]:
-    """Return (verdict, reason) for one item. verdict in
-    {"design", "construction", "unknown"}. Never raises — returns
-    ("unknown", "") on any problem, so the caller can fail open."""
+def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
+    """Return (verdict, reason, had_detail, is_sub) for one item. verdict in
+    {"relevant", "not_relevant", "unknown"}; is_sub flags a prime advertising
+    for a field-work subcontractor. Never raises — returns
+    ("unknown", "", had_detail, False) on any problem, so the caller fails
+    open."""
     title = item.get("title", "")
     detail = _fetch_detail_text(item.get("url", ""))
     had_detail = bool(detail)
@@ -177,9 +228,26 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str]:
         "landscaping-only.\n\n"
         "When in doubt, lean RELEVANT — it is better to surface a maybe than "
         "hide a real one.\n\n"
+        "SEPARATELY, detect a SUBCONTRACTOR / FIELD-WORK pattern. Some ads are "
+        "posted by a PRIME design firm (an A/E consultant that ALREADY HOLDS "
+        "the design contract) seeking to retain a SUBCONTRACTOR to perform "
+        "physical FIELD work — e.g. soil boring, geotechnical drilling, "
+        "pavement coring, test pits, field sampling, survey crews, or the "
+        "physical labor/testing that FEEDS a design rather than being design "
+        "itself. Signals: the 'Company' or advertiser is a private A/E firm "
+        "(not a government agency); language like 'is seeking to retain a "
+        "subcontractor', 'under contract with NYSDOT', 'to provide [field "
+        "service]'; ad type 'Contractor Ads'. When you see this pattern, set "
+        "\"sub\": true. This is INDEPENDENT of relevance — a field-sub ad on a "
+        "traffic project is still 'relevant' (keep it), but flag sub=true so "
+        "the reader knows the DESIGN is already awarded and only physical/field "
+        "sub-work is being advertised. If it's a normal agency solicitation or "
+        "a prime seeking design/engineering subconsultants, set \"sub\": false."
+        "\n\n"
         f"{context}\n"
         "Respond with ONLY a compact JSON object, no other text:\n"
-        '{"v": "relevant"|"not_relevant"|"unknown", "r": "<reason, max 10 words>"}'
+        '{"v": "relevant"|"not_relevant"|"unknown", "sub": true|false, '
+        '"r": "<reason, max 10 words>"}'
     )
     try:
         resp = requests.post(
@@ -199,9 +267,10 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str]:
         verdict = str(v.get("v", "unknown")).lower()
         if verdict not in ("relevant", "not_relevant", "unknown"):
             verdict = "unknown"
-        return verdict, str(v.get("r", ""))[:80], had_detail
+        is_sub = bool(v.get("sub", False))
+        return verdict, str(v.get("r", ""))[:80], had_detail, is_sub
     except Exception:
-        return "unknown", "", had_detail
+        return "unknown", "", had_detail, False
 
 
 def classify_results(results: list[dict]) -> list[dict]:
@@ -227,13 +296,13 @@ def classify_results(results: list[dict]) -> list[dict]:
                 try:
                     verdicts[idx] = fut.result()
                 except Exception:
-                    verdicts[idx] = ("unknown", "", False)
+                    verdicts[idx] = ("unknown", "", False, False)
     except Exception as e:
         print(f"[classify] batch failed ({e}) — leaving items unannotated.")
         return results
 
-    n_notrel = n_rel = n_rescued = 0
-    for idx, (verdict, reason, had_detail) in verdicts.items():
+    n_notrel = n_rel = n_rescued = n_sub = 0
+    for idx, (verdict, reason, had_detail, is_sub) in verdicts.items():
         item = results[idx]
         # SAFEGUARD: never filter out an item the AI could only see the TITLE of.
         # Without reading the actual solicitation, a "not_relevant" call is a
@@ -243,19 +312,35 @@ def classify_results(results: list[dict]) -> list[dict]:
         if verdict == "not_relevant" and not had_detail:
             verdict = "unknown"
             n_rescued += 1
+
+        # Sub/field-work note: a prime advertising for a field-work sub (coring,
+        # boring, etc.) STAYS in the main view (you asked to keep these), but we
+        # annotate the reason so it's obvious the design is already awarded.
+        item["is_sub_fieldwork"] = is_sub
+        sub_note = "sub/field work — design already awarded" if is_sub else ""
+        if is_sub:
+            n_sub += 1
+
+        def _with_sub(base: str) -> str:
+            if not is_sub:
+                return base
+            return f"{base} — {sub_note}" if base else sub_note
+
         if verdict == "not_relevant":
             item["relevance"] = "not_relevant"
-            item["relevance_reason"] = reason or ""
+            item["relevance_reason"] = _with_sub(reason or "")
             n_notrel += 1
         elif verdict == "relevant":
             item["relevance"] = "relevant"
-            item["relevance_reason"] = ""
+            # Relevant items normally have no reason line; but if it's a
+            # field-sub ad, surface that note so you can see it at a glance.
+            item["relevance_reason"] = sub_note if is_sub else ""
             n_rel += 1
         else:
             item["relevance"] = "unknown"
             # Keep the reason for unknowns so you can see the AI's read, but it
             # stays in the main view either way.
-            item["relevance_reason"] = reason or ""
+            item["relevance_reason"] = _with_sub(reason or "")
             item["relevance_title_only"] = not had_detail
             continue
         item["relevance_title_only"] = not had_detail
@@ -268,5 +353,6 @@ def classify_results(results: list[dict]) -> list[dict]:
           f"{n_notrel} not-relevant, "
           f"{len(results) - n_rel - n_notrel} unmarked, of {len(results)}"
           + (f" ({n_rescued} title-only kept in main view)" if n_rescued else "")
+          + (f" [{n_sub} flagged sub/field-work]" if n_sub else "")
           + ".")
     return results

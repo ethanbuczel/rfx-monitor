@@ -52,6 +52,21 @@ NEGATIVE_PHRASES = [
     "subconcession", "concession", "snack bar", "kiosk", "newsstand",
     "food and beverage", "hospitality", "riding stable", "golf course",
     "market subconcession",
+    # --- False-friends that keyword-match but are NOT traffic engineering. ---
+    # Each phrase is deliberately SPECIFIC so it can only hit the junk, never
+    # real design/inspection work:
+    "bus transportation for",   # moving people (shelter clients, students), not
+                                # transit engineering — the "for <people>" is key
+    "transportation for shelter",
+    "transportation services for",  # a service contract to transport people
+    "vehicle advertising",      # selling ad space on buses, not engineering
+    "bus and paratransit vehicle advertising",
+    "career readiness",         # workforce/jobs program
+    "travel reservation",       # trip-booking service
+    "ticketing services",       # ticket-booking service
+    "leachate",                 # landfill systems — never traffic
+    "e-bike battery",           # battery cabinets RFI, not roadway design
+    "refrigeration systems",    # building HVAC/refrigeration maintenance
 ]
 
 

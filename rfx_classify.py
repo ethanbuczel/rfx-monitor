@@ -54,11 +54,13 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RFxMonitor/1
 # returns the whole board (all opportunities mixed together), which pollutes the
 # classification of any single item with scope language from its neighbors. For
 # these, we skip the fetch and judge from the (clean) title alone.
+# NOTE: PASSPort was REMOVED from this list — its item URLs now point at
+# individual solicitation pages (process_manage_extranet/NNN), not the shared
+# board, so the classifier CAN fetch and read the real scope there now.
 SHARED_LISTING_URLS = (
     "mta.info/agency/construction-and-development/contracting/current-opportunities",
     "bidsapp.townofbabylon.com/Bid?statusId=2",
     "southampton.procureware.com/bids",
-    "passport.cityofnewyork.us",   # public board, not per-solicitation
     "bidnetdirect.com",            # bot-blocks fetches AND locks description
                                    # behind login — returns a useless shell, so
                                    # judge from the (clean) title instead
@@ -213,9 +215,17 @@ def classify_results(results: list[dict]) -> list[dict]:
         print(f"[classify] batch failed ({e}) — leaving items unannotated.")
         return results
 
-    n_notrel = n_rel = 0
+    n_notrel = n_rel = n_rescued = 0
     for idx, (verdict, reason, had_detail) in verdicts.items():
         item = results[idx]
+        # SAFEGUARD: never filter out an item the AI could only see the TITLE of.
+        # Without reading the actual solicitation, a "not_relevant" call is a
+        # guess — and filtering on a guess is exactly the over-filtering to
+        # avoid. Downgrade title-only "not_relevant" to "unknown" so it stays in
+        # the main view (as a potential contract) rather than the filtered block.
+        if verdict == "not_relevant" and not had_detail:
+            verdict = "unknown"
+            n_rescued += 1
         if verdict == "not_relevant":
             item["relevance"] = "not_relevant"
             item["relevance_reason"] = reason or ""
@@ -226,7 +236,10 @@ def classify_results(results: list[dict]) -> list[dict]:
             n_rel += 1
         else:
             item["relevance"] = "unknown"
-            item["relevance_reason"] = ""
+            # Keep the reason for unknowns so you can see the AI's read, but it
+            # stays in the main view either way.
+            item["relevance_reason"] = reason or ""
+            item["relevance_title_only"] = not had_detail
             continue
         item["relevance_title_only"] = not had_detail
 
@@ -236,5 +249,7 @@ def classify_results(results: list[dict]) -> list[dict]:
 
     print(f"[classify] tagged {n_rel} potential-contract, "
           f"{n_notrel} not-relevant, "
-          f"{len(results) - n_rel - n_notrel} unmarked, of {len(results)}.")
+          f"{len(results) - n_rel - n_notrel} unmarked, of {len(results)}"
+          + (f" ({n_rescued} title-only kept in main view)" if n_rescued else "")
+          + ".")
     return results

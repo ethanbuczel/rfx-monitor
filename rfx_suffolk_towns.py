@@ -291,16 +291,38 @@ def scrape_huntington() -> list[dict]:
 
 def scrape_smithtown() -> list[dict]:
     """Smithtown posts bids to its CivicPlus 'News Flash' feed. The page itself
-    is JS-rendered, but the RSS feed is clean XML — parse that instead."""
+    is JS-rendered, but the RSS feed is clean XML — parse that instead.
+    NOTE: this feed is a GENERAL news feed (bids + advisories + announcements),
+    so non-solicitation news items are filtered out — otherwise things like
+    'Traffic Advisory: Overnight Bridge Maintenance' (a road-closure notice,
+    not a bid) leak in as fake opportunities."""
     import feedparser
     out = []
     feed_url = "https://www.smithtownny.gov/RSSFeed.aspx?ModID=1&CID=All-newsflash.xml"
+    # Phrases that mark a NEWS/ADVISORY post rather than a solicitation.
+    NEWS_MARKERS = (
+        "traffic advisory", "road closure", "lane closure", "detour",
+        "advisory:", "press release", "announcement", "reminder",
+        "now open", "grand opening", "ribbon cutting", "public hearing",
+        "town board", "recap", "celebrat", "award ceremony", "proclamation",
+        "holiday", "schedule change", "office closed", "will be closed",
+    )
     try:
         feed = feedparser.parse(feed_url, request_headers=HEADERS)
         for entry in feed.entries:
             title = entry.get("title", "").strip()
             link = entry.get("link", feed_url)
             summary = entry.get("summary", "")
+            blob = f"{title} {summary}".lower()
+            # Skip news/advisory posts — they aren't solicitations.
+            if any(m in blob for m in NEWS_MARKERS):
+                continue
+            # Require some solicitation signal so only real bids pass.
+            SOLICIT_MARKERS = ("bid", "rfp", "rfq", "request for", "proposal",
+                               "invitation to", "solicitation", "ifb", "rfi",
+                               "notice to bidders", "sealed")
+            if not any(s in blob for s in SOLICIT_MARKERS):
+                continue
             if title and matches(title, summary):
                 out.append(result(SOURCE, "Town of Smithtown", title, link,
                                   date=entry.get("published", "")))

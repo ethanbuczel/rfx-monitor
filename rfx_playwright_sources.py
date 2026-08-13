@@ -431,60 +431,6 @@ async def scrape_passport(pw) -> list[dict]:
 
 # ─── 3. Suffolk County DPW ────────────────────────────────────────────────────
 
-async def scrape_suffolk(pw) -> list[dict]:
-    results = []
-    browser = await pw.chromium.launch(headless=True)
-    ctx = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
-    page = await ctx.new_page()
-    try:
-        await page.goto(
-            "https://www.suffolkcountyny.gov/Departments/Public-Works/Procurement",
-            timeout=30000
-        )
-        await page.wait_for_load_state("networkidle", timeout=20000)
-        await page.wait_for_timeout(1500)
-
-        # Suffolk usually lists bids as links in a content area
-        links = await page.query_selector_all("div.field-items a, div.content a, main a")
-        for link in links:
-            text = (await link.inner_text()).strip()
-            href = await link.get_attribute("href") or ""
-            if not href.startswith("http"):
-                href = "https://www.suffolkcountyny.gov" + href
-            # Skip nav/utility links
-            if len(text) < 10 or not any(c.isalpha() for c in text):
-                continue
-            if keyword_match(text):
-                results.append({
-                    "title": text,
-                    "agency": "Suffolk County DPW",
-                    "date": "",
-                    "url": href
-                })
-
-        # Also check for embedded BidNet iframe or redirect notice
-        if not results:
-            body = await page.inner_text("body")
-            if "bidnet" in body.lower():
-                results.append({
-                    "title": "Suffolk County bids now on BidNet Direct",
-                    "agency": "Suffolk County DPW",
-                    "date": "",
-                    "url": "https://www.bidnetdirect.com/suffolk-county-new-york"
-                })
-
-    except PWTimeout:
-        print("[Suffolk] Timed out")
-    except Exception as e:
-        print(f"[Suffolk] Error: {e}")
-    finally:
-        await browser.close()
-    return results
-
-
 # ─── 4. Nassau County ─────────────────────────────────────────────────────────
 
 async def scrape_nassau(pw) -> list[dict]:

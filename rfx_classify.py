@@ -61,6 +61,13 @@ SHARED_LISTING_URLS = (
     "mta.info/agency/construction-and-development/contracting/current-opportunities",
     "bidsapp.townofbabylon.com/Bid?statusId=2",
     "southampton.procureware.com/bids",
+    "rfp.westchestergov.com/rfp/rfps",  # shared board — every item has this same
+                                        # URL, so fetching it returns ALL the
+                                        # county's RFPs mixed together and the
+                                        # classifier bleeds neighbors' scope into
+                                        # the judgment (e.g. tagging a
+                                        # Transportation RFP with "short-term
+                                        # rental software" from another listing)
     "bidnetdirect.com",            # bot-blocks fetches AND locks description
                                    # behind login — returns a useless shell, so
                                    # judge from the (clean) title instead

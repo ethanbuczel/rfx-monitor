@@ -151,7 +151,10 @@ def fetch_samgov() -> list[dict]:
                 "postedFrom": posted_from,
                 "postedTo": posted_to,
                 "ncode": ncode,
-                "limit": 100,
+                "limit": 1000,   # SAM allows up to 1000; large enough that these
+                                 # NAICS/date totals fit in ONE page — avoids a
+                                 # SAM offset-paging quirk that returned an empty
+                                 # 2nd page and silently dropped tail records.
                 "offset": offset,
             }
             try:
@@ -194,7 +197,7 @@ def fetch_samgov() -> list[dict]:
                     date=o.get("postedDate", ""), due=deadline,
                     extra=f"{state or '??'} | {o.get('solicitationNumber') or ''}",
                 ))
-            offset += 100
+            offset += 1000
             if offset >= total or not rows:
                 break
 

@@ -138,6 +138,11 @@ def fetch_samgov() -> list[dict]:
     out = []
 
     # Loop NAICS codes; SAM filters one ncode per request.
+    import os as _os
+    _diag = _os.environ.get("DIAG")
+    _raw_total = 0
+    _pre_filter = 0
+    _states_seen = {}
     for ncode in NAICS_CODES:
         offset = 0
         while True:
@@ -151,6 +156,11 @@ def fetch_samgov() -> list[dict]:
             }
             try:
                 r = requests.get(base, params=params, headers=HEADERS, timeout=40)
+                if _diag:
+                    print(f"[SAM DIAG] ncode={ncode} offset={offset} "
+                          f"HTTP={r.status_code}")
+                    if r.status_code != 200:
+                        print(f"[SAM DIAG] body: {r.text[:300]}")
                 r.raise_for_status()
                 data = r.json()
             except Exception as e:
@@ -158,12 +168,21 @@ def fetch_samgov() -> list[dict]:
                 break
 
             rows = data.get("opportunitiesData", []) or []
+            total = data.get("totalRecords", 0)
+            if _diag:
+                _raw_total = total
+                _pre_filter += len(rows)
+                print(f"[SAM DIAG] ncode={ncode} totalRecords={total} "
+                      f"rows_this_page={len(rows)} "
+                      f"window={posted_from}..{posted_to}")
             for o in rows:
                 # Geo filter: keep only solicitations performed in target states.
                 # (NAICS already constrains to engineering server-side, so a
                 # keyword re-check here is redundant and was the source of the
                 # earlier "everything matches" bug.)
                 state = _pop_state(o)
+                if _diag:
+                    _states_seen[state or "??"] = _states_seen.get(state or "??", 0) + 1
                 if SAM_STATES and state not in SAM_STATES:
                     continue
                 title = o.get("title", "")
@@ -175,11 +194,14 @@ def fetch_samgov() -> list[dict]:
                     date=o.get("postedDate", ""), due=deadline,
                     extra=f"{state or '??'} | {o.get('solicitationNumber') or ''}",
                 ))
-            total = data.get("totalRecords", 0)
             offset += 100
             if offset >= total or not rows:
                 break
 
+    if _diag:
+        print(f"[SAM DIAG] SUMMARY: {_pre_filter} rows pre-state-filter, "
+              f"{len(out)} after keeping {sorted(SAM_STATES)}. "
+              f"States seen: {dict(sorted(_states_seen.items(), key=lambda x:-x[1])[:8])}")
     print(f"[SAM.gov] {len(out)} matches")
     return out
 

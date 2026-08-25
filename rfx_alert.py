@@ -771,7 +771,7 @@ def main() -> None:
     all_results: list[dict] = []
     all_results += fetch_samgov()
     all_results += fetch_crol()
-    all_results += fetch_njdot()
+    # all_results += fetch_njdot()   # DISABLED for now — re-enable by uncommenting
     all_results += fetch_nysdot()
     all_results += fetch_nyscr()
     all_results += fetch_nassau()

@@ -1,0 +1,51 @@
+name: RFx Digest TEST
+
+# Manual-only test workflow. Runs the SAME rfx_alert.py as production, but:
+#   * sends to a separate test email (RFX_RECIPIENT_TEST secret)
+#   * sets SKIP_SEEN_WRITE=1 so the run does NOT write/commit rfx_seen.json
+#     — it still READS the seen file (so "new" tags look realistic), it just
+#     never records what it saw, so your real weekday run's newness tracking
+#     is left completely intact.
+#   * has NO commit step at all (belt-and-suspenders — even if the seen file
+#     were written locally, this workflow never pushes it).
+#
+# Use this to test new code/files without disturbing the real digest.
+
+on:
+  workflow_dispatch:   # manual "Run workflow" button only — never scheduled
+
+# No "contents: write" — this workflow intentionally never commits anything.
+permissions:
+  contents: read
+
+jobs:
+  digest-test:
+    runs-on: self-hosted   # same self-hosted runner (your PC must be awake)
+    timeout-minutes: 30
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          py -m pip install -r requirements.txt
+          py -m playwright install chromium
+
+      - name: Run RFx digest (TEST — no seen write)
+        env:
+          SAM_API_KEY: ${{ secrets.SAM_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          # >>> the two differences from production: <<<
+          RFX_RECIPIENT: ${{ secrets.RFX_RECIPIENT_TEST }}
+          SKIP_SEEN_WRITE: "1"
+          # everything else identical to the real run:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ISLIP_EMAIL: ${{ secrets.ISLIP_EMAIL }}
+          ISLIP_PASSWORD: ${{ secrets.ISLIP_PASSWORD }}
+          LLM_MODE: off
+          # DIAG: "1"   # uncomment to get structure dumps in the test run logs
+        run: py rfx_alert.py
+
+      # NOTE: intentionally NO "Commit updated seen-file" step. That is what
+      # keeps a test run from touching your real "new" tracking.

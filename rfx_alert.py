@@ -757,6 +757,14 @@ def load_seen() -> set:
 
 
 def save_seen(keys: set) -> None:
+    # Test runs set SKIP_SEEN_WRITE=1 so they can send a full digest WITHOUT
+    # recording what they saw — otherwise the test would "consume" the newness
+    # of items and the next real run wouldn't flag them as new. The seen file is
+    # still READ normally (so the test email's "new" tags look realistic); only
+    # the write-back is skipped.
+    if os.environ.get("SKIP_SEEN_WRITE"):
+        print("[seen] SKIP_SEEN_WRITE set — not writing seen file (test run).")
+        return
     try:
         with open(SEEN_FILE, "w", encoding="utf-8") as f:
             json.dump(sorted(keys), f)

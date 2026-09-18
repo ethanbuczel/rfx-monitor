@@ -153,33 +153,9 @@ def _fetch_detail_text(url: str) -> str:
         return ""
 
 
-def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
-    """Return (verdict, reason, had_detail, is_sub) for one item. verdict in
-    {"relevant", "not_relevant", "unknown"}; is_sub flags a prime advertising
-    for a field-work subcontractor. Never raises — returns
-    ("unknown", "", had_detail, False) on any problem, so the caller fails
-    open."""
-    title = item.get("title", "")
-    detail = _fetch_detail_text(item.get("url", ""))
-    had_detail = bool(detail)
-    source_hint = f"[{item.get('source','')} / {item.get('agency','')}]"
-    context = f"Title: {title}\nSource: {source_hint}\n"
-    if detail:
-        context += f"Detail page excerpt: {detail}\n"
-    else:
-        context += (
-            "Detail page: COULD NOT BE FETCHED. You have ONLY the title above. "
-            "Do NOT invent or assume specific scope details you cannot see. In "
-            "particular, do NOT infer 'interior' or 'building' scope just "
-            "because a place name (e.g. 'Town Hall', 'Station', 'Courthouse') "
-            "appears — an 'ADA Ramp' or 'sidewalk' at such a location is often "
-            "PEDESTRIAN/roadway work, which IS relevant. Judge only from what "
-            "the title actually states, and when it names a transportation, "
-            "roadway, pedestrian/ADA-ramp, bridge, or traffic term, lean "
-            "RELEVANT. If the title is truly too vague to tell, answer "
-            "'unknown'.\n")
-
-    prompt = (
+def _traffic_prompt(context: str) -> str:
+    """Default domain prompt: TRAFFIC/transportation engineering."""
+    return (
         "You screen government procurement opportunities for a TRAFFIC "
         "ENGINEERING consulting firm. Decide whether the opportunity is a "
         "POTENTIAL CONTRACT for them.\n\n"
@@ -249,6 +225,47 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
         '{"v": "relevant"|"not_relevant"|"unknown", "sub": true|false, '
         '"r": "<reason, max 10 words>"}'
     )
+
+
+# Swappable prompt builder. The CM pipeline (rfx_cm_classify) sets this to its
+# own domain prompt so it can reuse ALL the fetch/PDF/threading/safeguard
+# machinery in this module without duplicating it.
+_PROMPT_BUILDER = _traffic_prompt
+
+
+def set_prompt_builder(fn) -> None:
+    """Override the domain prompt (used by the CM pipeline)."""
+    global _PROMPT_BUILDER
+    _PROMPT_BUILDER = fn
+
+
+def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
+    """Return (verdict, reason, had_detail, is_sub) for one item. verdict in
+    {"relevant", "not_relevant", "unknown"}; is_sub flags a prime advertising
+    for a field-work subcontractor. Never raises — returns
+    ("unknown", "", had_detail, False) on any problem, so the caller fails
+    open."""
+    title = item.get("title", "")
+    detail = _fetch_detail_text(item.get("url", ""))
+    had_detail = bool(detail)
+    source_hint = f"[{item.get('source','')} / {item.get('agency','')}]"
+    context = f"Title: {title}\nSource: {source_hint}\n"
+    if detail:
+        context += f"Detail page excerpt: {detail}\n"
+    else:
+        context += (
+            "Detail page: COULD NOT BE FETCHED. You have ONLY the title above. "
+            "Do NOT invent or assume specific scope details you cannot see. In "
+            "particular, do NOT infer 'interior' or 'building' scope just "
+            "because a place name (e.g. 'Town Hall', 'Station', 'Courthouse') "
+            "appears — an 'ADA Ramp' or 'sidewalk' at such a location is often "
+            "PEDESTRIAN/roadway work, which IS relevant. Judge only from what "
+            "the title actually states, and when it names a transportation, "
+            "roadway, pedestrian/ADA-ramp, bridge, or traffic term, lean "
+            "RELEVANT. If the title is truly too vague to tell, answer "
+            "'unknown'.\n")
+
+    prompt = _PROMPT_BUILDER(context)
     try:
         resp = requests.post(
             OPENROUTER_URL,

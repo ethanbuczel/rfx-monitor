@@ -1,0 +1,53 @@
+name: RFx Digest CM
+
+# Construction-Management / vertical digest. Reuses the SAME scrapers and engine
+# as the traffic digest, but CM_MODE=1 flips it to the CM keyword filter + CM
+# classifier, sends to a separate CM recipient, and tracks its own seen-file
+# (rfx_seen_cm.json) so it's fully independent of the traffic digest.
+
+on:
+  workflow_dispatch:        # manual "Run workflow" button
+  schedule:
+    - cron: '0 12 * * 1-5'  # weekdays 12:00 UTC (~8 AM ET) — offset 1h from the
+                            # traffic run so the two don't hit the runner at once
+
+permissions:
+  contents: write           # to commit the CM seen-file
+
+jobs:
+  digest-cm:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          py -m pip install -r requirements.txt
+          py -m playwright install chromium
+
+      - name: Run RFx CM digest
+        env:
+          CM_MODE: "1"                                   # <<< enables CM pipeline
+          RFX_RECIPIENT_CM: ${{ secrets.RFX_RECIPIENT_CM }}
+          SAM_API_KEY: ${{ secrets.SAM_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ISLIP_EMAIL: ${{ secrets.ISLIP_EMAIL }}
+          ISLIP_PASSWORD: ${{ secrets.ISLIP_PASSWORD }}
+          LLM_MODE: off
+          # DIAG: "1"   # uncomment for structure dumps in the logs
+        run: py rfx_alert.py
+
+      - name: Commit updated CM seen-file
+        run: |
+          git config user.name "rfx-bot"
+          git config user.email "actions@github.com"
+          git add rfx_seen_cm.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Update rfx_seen_cm.json [skip ci]"
+          }
+          git push

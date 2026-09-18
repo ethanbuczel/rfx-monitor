@@ -70,9 +70,9 @@ NEGATIVE_PHRASES = [
 ]
 
 
-def matches(*text_parts) -> bool:
+def _default_matches(*text_parts) -> bool:
     """True if any provided text contains a relevant keyword/acronym/NAICS code
-    AND no negative phrase is present."""
+    AND no negative phrase is present. (Traffic/transportation domain.)"""
     blob = " ".join(p for p in text_parts if p)
     low = blob.lower()
     if any(neg in low for neg in NEGATIVE_PHRASES):
@@ -86,6 +86,24 @@ def matches(*text_parts) -> bool:
     if any(code in blob for code in NAICS_CODES):
         return True
     return False
+
+
+# Swappable matcher. The CM pipeline (rfx_cm_alert) flips this to the CM keyword
+# filter BEFORE scraping, so the same scrapers filter for CM candidates instead
+# of traffic — no scraper duplication. Defaults to the traffic matcher.
+_MATCHER = _default_matches
+
+
+def set_matcher(fn) -> None:
+    """Override the keyword matcher used by all scrapers (used by CM pipeline).
+    Pass None to restore the default traffic matcher."""
+    global _MATCHER
+    _MATCHER = fn if fn is not None else _default_matches
+
+
+def matches(*text_parts) -> bool:
+    """Delegates to the active matcher (traffic by default, CM when swapped)."""
+    return _MATCHER(*text_parts)
 
 
 def result(source, agency, title, url, date=None, extra=None, due=None) -> dict:

@@ -36,13 +36,24 @@ from rfx_common import matches, result, NAICS_CODES
 SAM_API_KEY       = os.environ.get("SAM_API_KEY", "")            # from sam.gov
 GMAIL_ADDRESS     = os.environ.get("GMAIL_ADDRESS", "")          # you@gmail.com
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")    # 16-char app pw
-RECIPIENT         = os.environ.get("RFX_RECIPIENT", "") or GMAIL_ADDRESS
+
+# CM_MODE flips this whole run to Construction-Management / vertical work:
+# CM keyword filter, CM classifier, a SEPARATE recipient and seen-file, so the
+# CM digest is fully independent of the traffic digest but reuses all scrapers.
+CM_MODE = bool(os.environ.get("CM_MODE"))
+if CM_MODE:
+    RECIPIENT = (os.environ.get("RFX_RECIPIENT_CM", "")
+                 or os.environ.get("RFX_RECIPIENT", "")
+                 or os.environ.get("GMAIL_ADDRESS", ""))
+else:
+    RECIPIENT = os.environ.get("RFX_RECIPIENT", "") or os.environ.get(
+        "GMAIL_ADDRESS", "")
 
 LOOKBACK_DAYS = 7           # SAM.gov window each run
 # SAM.gov is filtered to these place-of-performance states (GPI is regional, and
 # NAICS 541330 federal engineering is otherwise a national firehose). Widen or
 # clear this set to see more.
-SAM_STATES = {"NY", "NJ"}
+SAM_STATES = {"NY", "NJ", "CT"} if CM_MODE else {"NY", "NJ"}
 CROL_LOOKBACK_DAYS = 21     # CROL publishes in batches; a wider window catches more.
                            # Bump to ~120 for a one-time catch-up, then drop back.
 INCLUDE_PLAYWRIGHT = True  # set False to skip the four JS portals
@@ -52,7 +63,9 @@ INCLUDE_PLAYWRIGHT = True  # set False to skip the four JS portals
 # JSON file remembers what's already been seen so "new" can be computed. The very
 # first run has no history, so nothing is flagged new that time; every run after
 # flags genuinely new postings.
-SEEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rfx_seen.json")
+SEEN_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "rfx_seen_cm.json" if CM_MODE else "rfx_seen.json")
 
 # NJDOT Bureau of Professional Services — current consultant solicitations.
 # This page is entirely transportation consulting, so all rows are listed
@@ -774,6 +787,15 @@ def save_seen(keys: set) -> None:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main() -> None:
+    if CM_MODE:
+        # Flip all scrapers to the CM keyword filter BEFORE any scraping.
+        try:
+            import rfx_common
+            from rfx_cm_common import cm_matches
+            rfx_common.set_matcher(cm_matches)
+            print("=== CM MODE: Construction-Management / vertical filter ===")
+        except Exception as e:
+            print(f"[CM] could not enable CM matcher: {e}")
     print(f"=== RFx run {dt.datetime.now():%Y-%m-%d %H:%M} "
           f"(lookback {LOOKBACK_DAYS}d) ===")
     all_results: list[dict] = []
@@ -854,7 +876,10 @@ def main() -> None:
     # opportunity's detail page and tags likely-construction bids with a note
     # (never removes them). Fails open — any error leaves items unannotated.
     try:
-        from rfx_classify import classify_results
+        if CM_MODE:
+            from rfx_cm_classify import classify_results
+        else:
+            from rfx_classify import classify_results
         deduped = classify_results(deduped)
     except Exception as e:
         print(f"[classify] module error (continuing without it): {e}")

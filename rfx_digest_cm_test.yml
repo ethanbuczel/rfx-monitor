@@ -1,0 +1,46 @@
+name: RFx Digest CM TEST
+
+# CM digest in TEST mode: same as the CM pipeline (CM_MODE=1) but it does NOT
+# write/commit the CM seen-file (SKIP_SEEN_WRITE=1). So it shows what's NEW each
+# run without "consuming" the newness — ideal while tuning the CM filter and
+# classifier. Manual-only, no schedule, no commit step.
+#
+# NOTE: because the real CM run baselines everything into rfx_seen_cm.json, to
+# see meaningful "NEW" flags here you may want to delete rfx_seen_cm.json from
+# the repo first (resets the baseline), then iterate with this test workflow.
+
+on:
+  workflow_dispatch:        # manual "Run workflow" button only
+
+permissions:
+  contents: read            # never commits anything
+
+jobs:
+  digest-cm-test:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          py -m pip install -r requirements.txt
+          py -m playwright install chromium
+
+      - name: Run RFx CM digest (TEST — no seen write)
+        env:
+          CM_MODE: "1"                                    # CM pipeline
+          SKIP_SEEN_WRITE: "1"                            # read but don't write
+          RFX_RECIPIENT_CM: ${{ secrets.RFX_RECIPIENT_CM }}
+          SAM_API_KEY: ${{ secrets.SAM_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ISLIP_EMAIL: ${{ secrets.ISLIP_EMAIL }}
+          ISLIP_PASSWORD: ${{ secrets.ISLIP_PASSWORD }}
+          LLM_MODE: off
+          # DIAG: "1"
+        run: py rfx_alert.py
+
+      # NO commit step — the CM seen-file is never written or pushed.

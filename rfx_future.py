@@ -29,6 +29,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RFxMonitor/1
 
 NYSDOT_PRELIM_URL = ("https://www.dot.ny.gov/doing-business/opportunities/"
                      "eng-preliminaryad")
+NYSDOT_DESIGNBUILD_URL = ("https://www.dot.ny.gov/main/business-center/"
+                          "potential-design-build-projects")
 NYCDOT_FUTURE_URL = "https://a841-dotwebpcard01.nyc.gov/RFP/Home/Future"
 NYCDOT_CURRENT_URL = "https://a841-dotwebpcard01.nyc.gov/RFP/Home/Current"
 
@@ -79,6 +81,78 @@ def fetch_nysdot_prelim() -> list[dict]:
                               due=f"Ad ~{ad_date}" if ad_date else ""))
 
     print(f"[Future/NYSDOT] {len(out)} upcoming")
+    return out
+
+
+# ─── NYSDOT Potential Design-Build Projects ───────────────────────────────────
+def fetch_nysdot_designbuild() -> list[dict]:
+    """NYSDOT's 'Potential Design-Build Projects' page — upcoming DB projects
+    not yet formally advertised. A different pipeline from the consultant ads,
+    and a strong early-warning signal for the Future RFPs section.
+    Structure unknown at build time (page is robots-blocked from preview), so
+    this harvests project links + headings generously and dumps structure under
+    DIAG so the first run can be tuned precisely."""
+    import os as _os
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        print("[Future/DB] beautifulsoup4 not installed — skipping.")
+        return []
+    try:
+        r = requests.get(NYSDOT_DESIGNBUILD_URL, headers=HEADERS, timeout=40)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"[Future/DB] error: {e}")
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    out, seen = [], set()
+
+    # Candidate project entries: links to individual DB project pages
+    # (/designbuildproject*, /main/business-center/*), plus heading text.
+    candidates = []
+    for a in soup.find_all("a", href=True):
+        txt = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
+        href = a["href"]
+        if len(txt) < 8:
+            continue
+        # DB project links, or any link whose text names a project/route/bridge.
+        if re.search(r"design.?build|/designbuild|business-center", href, re.I) \
+                or re.search(r"\b(bridge|route|highway|corridor|interchange|"
+                             r"replacement|rehabilitation|reconstruction|PIN)\b",
+                             txt, re.I):
+            if not href.startswith("http"):
+                href = "https://www.dot.ny.gov" + (
+                    href if href.startswith("/") else "/" + href)
+            candidates.append((txt, href))
+    # Also consider heading rows (some DB lists are headings + tables, not links)
+    for h in soup.find_all(["h2", "h3", "h4", "td", "li"]):
+        txt = re.sub(r"\s+", " ", h.get_text(" ", strip=True)).strip()
+        if 12 <= len(txt) <= 200 and re.search(
+                r"\b(bridge|route|highway|corridor|interchange|replacement|"
+                r"rehabilitation|reconstruction|design.?build)\b", txt, re.I):
+            candidates.append((txt, NYSDOT_DESIGNBUILD_URL))
+
+    if _os.environ.get("DIAG"):
+        print(f"[DB DIAG] http={r.status_code} body_chars={len(r.text)} "
+              f"candidates={len(candidates)}")
+        for txt, href in candidates[:20]:
+            print(f"    {txt[:70]!r} -> {href[:70]}")
+
+    for txt, href in candidates:
+        key = txt.lower()[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        # Skip obvious nav/utility text.
+        if re.search(r"^(home|contact|about|search|site map|accessibility|"
+                     r"privacy|business center|doing business)$", txt, re.I):
+            continue
+        if matches(txt):
+            out.append(result(SOURCE, "NYSDOT (Design-Build)", txt[:150], href,
+                              due="Potential — not yet advertised"))
+
+    print(f"[Future/DB] {len(out)} potential design-build")
     return out
 
 
@@ -177,7 +251,9 @@ def fetch_nycdot_current() -> list[dict]:
 
 def get_future_results() -> list[dict]:
     """Called from rfx_alert.py — combined upcoming opportunities."""
-    return fetch_nysdot_prelim() + fetch_nycdot_future()
+    return (fetch_nysdot_prelim()
+            + fetch_nysdot_designbuild()
+            + fetch_nycdot_future())
 
 
 def get_current_results() -> list[dict]:

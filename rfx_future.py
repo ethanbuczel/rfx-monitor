@@ -108,46 +108,57 @@ def fetch_nysdot_designbuild() -> list[dict]:
     soup = BeautifulSoup(r.text, "html.parser")
     out, seen = [], set()
 
-    # Candidate project entries: links to individual DB project pages
-    # (/designbuildproject*, /main/business-center/*), plus heading text.
+    # A REAL design-build project entry names a specific project: it contains a
+    # PIN (e.g. X727.07) or a project/route number (e.g. X72707), plus a project
+    # name. The page's own title, headings, and nav links ("NYSDOT Design Build
+    # Projects", "Potential Design-Build Projects", "Bridge Manuals") do NOT
+    # carry a PIN — that's how we tell a project from page chrome.
+    PIN_RE = re.compile(r"\b(?:PIN\s*)?[A-Z]\d{3}\.?\d{2,3}\b")
+
+    # Page-chrome titles/headings to reject outright (these were showing up as
+    # fake "projects" because they contain the words design/build/bridge).
+    CHROME_RE = re.compile(
+        r"^(?:nysdot\s+)?(?:potential\s+)?design[\s\-]?build\s+projects?$"
+        r"|^bridge manuals|^potential design-build projects$"
+        r"|^home$|^contact|^about|^search|^site map|^accessibility|^privacy"
+        r"|^business center|^doing business|^opportunities$",
+        re.I)
+
     candidates = []
+    # Prefer links to individual project pages, but REQUIRE a PIN/route number
+    # in the link text (that's what distinguishes a project from a nav link).
     for a in soup.find_all("a", href=True):
         txt = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
         href = a["href"]
-        if len(txt) < 8:
+        if len(txt) < 10 or CHROME_RE.search(txt):
             continue
-        # DB project links, or any link whose text names a project/route/bridge.
-        if re.search(r"design.?build|/designbuild|business-center", href, re.I) \
-                or re.search(r"\b(bridge|route|highway|corridor|interchange|"
-                             r"replacement|rehabilitation|reconstruction|PIN)\b",
-                             txt, re.I):
+        if PIN_RE.search(txt):
             if not href.startswith("http"):
                 href = "https://www.dot.ny.gov" + (
                     href if href.startswith("/") else "/" + href)
             candidates.append((txt, href))
-    # Also consider heading rows (some DB lists are headings + tables, not links)
-    for h in soup.find_all(["h2", "h3", "h4", "td", "li"]):
+    # Table/list rows that name a project WITH a PIN (some DB lists are tables).
+    for h in soup.find_all(["td", "li", "tr", "p"]):
         txt = re.sub(r"\s+", " ", h.get_text(" ", strip=True)).strip()
-        if 12 <= len(txt) <= 200 and re.search(
-                r"\b(bridge|route|highway|corridor|interchange|replacement|"
-                r"rehabilitation|reconstruction|design.?build)\b", txt, re.I):
+        if 12 <= len(txt) <= 200 and PIN_RE.search(txt) \
+                and not CHROME_RE.search(txt):
             candidates.append((txt, NYSDOT_DESIGNBUILD_URL))
 
     if _os.environ.get("DIAG"):
         print(f"[DB DIAG] http={r.status_code} body_chars={len(r.text)} "
               f"candidates={len(candidates)}")
         for txt, href in candidates[:20]:
-            print(f"    {txt[:70]!r} -> {href[:70]}")
+            print(f"    {txt[:80]!r} -> {href[:60]}")
 
     for txt, href in candidates:
-        key = txt.lower()[:60]
+        # Dedupe by the PIN itself, so the same project described two slightly
+        # different ways (link vs. table row) collapses into one entry.
+        pin_m = PIN_RE.search(txt)
+        key = (re.sub(r"[^A-Z0-9]", "", pin_m.group(0).upper()).replace("PIN", "")
+               if pin_m else txt.lower()[:60])
         if key in seen:
             continue
         seen.add(key)
-        # Skip obvious nav/utility text.
-        if re.search(r"^(home|contact|about|search|site map|accessibility|"
-                     r"privacy|business center|doing business)$", txt, re.I):
-            continue
         if matches(txt):
             out.append(result(SOURCE, "NYSDOT (Design-Build)", txt[:150], href,
                               due="Potential — not yet advertised"))

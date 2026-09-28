@@ -44,7 +44,7 @@ jobs:
           ISLIP_EMAIL: ${{ secrets.ISLIP_EMAIL }}
           ISLIP_PASSWORD: ${{ secrets.ISLIP_PASSWORD }}
           LLM_MODE: off
-          # DIAG: "1"   # uncomment to get structure dumps in the test run logs
+          DIAG: "1"   # uncomment to get structure dumps in the test run logs
         run: py rfx_alert.py
 
       # NOTE: intentionally NO "Commit updated seen-file" step. That is what

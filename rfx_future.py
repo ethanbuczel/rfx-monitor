@@ -146,19 +146,18 @@ def fetch_nysdot_designbuild() -> list[dict]:
                 and not CHROME_RE.search(txt):
             candidates.append((txt, NYSDOT_DESIGNBUILD_URL))
 
-    # TEMP self-diagnosis (always prints, not gated behind DIAG) so we can see
-    # the page structure regardless of the DIAG toggle. Remove once confirmed.
-    print(f"[DB DIAG] http={r.status_code} body_chars={len(r.text)} "
-          f"raw_candidates={len(candidates)}")
-    for txt, href in candidates[:20]:
-        print(f"[DB DIAG]   {txt[:80]!r} -> {href[:70]}")
-    if not candidates:
-        # dump a sample of ALL links so we can see what the page actually has
-        alllinks = [a.get_text(' ', strip=True) for a in soup.find_all('a')]
-        print(f"[DB DIAG] 0 candidates; page has {len(alllinks)} links, sample:")
-        for lk in alllinks[:25]:
-            if lk.strip():
-                print(f"[DB DIAG]     {lk[:70]!r}")
+    if _os.environ.get("DIAG"):
+        print(f"[DB DIAG] http={r.status_code} body_chars={len(r.text)} "
+              f"raw_candidates={len(candidates)}")
+        for txt, href in candidates[:20]:
+            print(f"[DB DIAG]   {txt[:80]!r} -> {href[:70]}")
+        if not candidates:
+            alllinks = [a.get_text(' ', strip=True) for a in soup.find_all('a')]
+            print(f"[DB DIAG] 0 candidates; page has {len(alllinks)} links, "
+                  f"sample:")
+            for lk in alllinks[:25]:
+                if lk.strip():
+                    print(f"[DB DIAG]     {lk[:70]!r}")
 
     for txt, href in candidates:
         # Dedupe: prefer the project's sub-page path as the key (so multiple

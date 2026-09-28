@@ -125,37 +125,54 @@ def fetch_nysdot_designbuild() -> list[dict]:
         re.I)
 
     candidates = []
-    # Prefer links to individual project pages, but REQUIRE a PIN/route number
-    # in the link text (that's what distinguishes a project from a nav link).
+    # (a) links to individual project sub-pages: /potential-design-build-
+    #     projects/<Project Name> — these ARE the projects, PIN or not.
     for a in soup.find_all("a", href=True):
         txt = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
         href = a["href"]
-        if len(txt) < 10 or CHROME_RE.search(txt):
+        if len(txt) < 6 or CHROME_RE.search(txt):
             continue
-        if PIN_RE.search(txt):
+        is_project_link = re.search(
+            r"/potential-design-build-projects/.+", href, re.I)
+        if is_project_link or PIN_RE.search(txt):
             if not href.startswith("http"):
                 href = "https://www.dot.ny.gov" + (
                     href if href.startswith("/") else "/" + href)
             candidates.append((txt, href))
-    # Table/list rows that name a project WITH a PIN (some DB lists are tables).
+    # (b) table/list rows that name a project WITH a PIN.
     for h in soup.find_all(["td", "li", "tr", "p"]):
         txt = re.sub(r"\s+", " ", h.get_text(" ", strip=True)).strip()
         if 12 <= len(txt) <= 200 and PIN_RE.search(txt) \
                 and not CHROME_RE.search(txt):
             candidates.append((txt, NYSDOT_DESIGNBUILD_URL))
 
-    if _os.environ.get("DIAG"):
-        print(f"[DB DIAG] http={r.status_code} body_chars={len(r.text)} "
-              f"candidates={len(candidates)}")
-        for txt, href in candidates[:20]:
-            print(f"    {txt[:80]!r} -> {href[:60]}")
+    # TEMP self-diagnosis (always prints, not gated behind DIAG) so we can see
+    # the page structure regardless of the DIAG toggle. Remove once confirmed.
+    print(f"[DB DIAG] http={r.status_code} body_chars={len(r.text)} "
+          f"raw_candidates={len(candidates)}")
+    for txt, href in candidates[:20]:
+        print(f"[DB DIAG]   {txt[:80]!r} -> {href[:70]}")
+    if not candidates:
+        # dump a sample of ALL links so we can see what the page actually has
+        alllinks = [a.get_text(' ', strip=True) for a in soup.find_all('a')]
+        print(f"[DB DIAG] 0 candidates; page has {len(alllinks)} links, sample:")
+        for lk in alllinks[:25]:
+            if lk.strip():
+                print(f"[DB DIAG]     {lk[:70]!r}")
 
     for txt, href in candidates:
-        # Dedupe by the PIN itself, so the same project described two slightly
-        # different ways (link vs. table row) collapses into one entry.
+        # Dedupe: prefer the project's sub-page path as the key (so multiple
+        # links to the SAME project — one with a PIN, one just the name —
+        # collapse into one). Fall back to the PIN, then the text.
+        subpage_m = re.search(
+            r"/potential-design-build-projects/([^/?#]+)", href, re.I)
         pin_m = PIN_RE.search(txt)
-        key = (re.sub(r"[^A-Z0-9]", "", pin_m.group(0).upper()).replace("PIN", "")
-               if pin_m else txt.lower()[:60])
+        if subpage_m:
+            key = subpage_m.group(1).lower()
+        elif pin_m:
+            key = re.sub(r"[^A-Z0-9]", "", pin_m.group(0).upper()).replace("PIN", "")
+        else:
+            key = txt.lower()[:60]
         if key in seen:
             continue
         seen.add(key)

@@ -42,6 +42,8 @@ import requests
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "anthropic/claude-haiku-4.5"   # paid Haiku via OpenRouter
+_LLM_ERR_LOGGED = False
+_LLM_ERR_LOGGED2 = False
 TIMEOUT_LLM = 30
 TIMEOUT_FETCH = 20
 MAX_FETCH_WORKERS = 6      # parallel detail-page fetches
@@ -276,7 +278,17 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
                   "temperature": 0},
             timeout=TIMEOUT_LLM,
         )
-        resp.raise_for_status()
+        # Surface real API failures instead of swallowing them. One shared flag
+        # so we log the FIRST failure's detail (status + body) rather than
+        # spamming it 75 times — enough to diagnose expired key / no credits /
+        # rate limit from the run log.
+        if resp.status_code != 200:
+            global _LLM_ERR_LOGGED
+            if not _LLM_ERR_LOGGED:
+                _LLM_ERR_LOGGED = True
+                print(f"[classify] OpenRouter HTTP {resp.status_code}: "
+                      f"{resp.text[:200]}")
+            return "unknown", "", had_detail, False
         content = resp.json()["choices"][0]["message"]["content"]
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
         import json
@@ -286,7 +298,11 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
             verdict = "unknown"
         is_sub = bool(v.get("sub", False))
         return verdict, str(v.get("r", ""))[:80], had_detail, is_sub
-    except Exception:
+    except Exception as e:
+        global _LLM_ERR_LOGGED2
+        if not _LLM_ERR_LOGGED2:
+            _LLM_ERR_LOGGED2 = True
+            print(f"[classify] OpenRouter call failed: {type(e).__name__}: {e}")
         return "unknown", "", had_detail, False
 
 

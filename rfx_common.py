@@ -14,6 +14,12 @@ import re
 # Multi-word / ordinary words are matched as case-insensitive substrings.
 PHRASE_KEYWORDS = [
     "traffic", "traffic signal", "signalization", "traffic engineering",
+    # signal work not always phrased as "traffic signal" (e.g. Nassau's
+    # "Signal Communication Phase III"). Specific phrases only — NOT bare
+    # "signal", which would false-match fire-alarm/radio/IT signals.
+    "signal communication", "signal interconnect", "signal system",
+    "signal timing", "signalized intersection", "signal upgrade",
+    "adaptive signal", "signal controller",
     "intelligent transportation", "roadway", "highway", "intersection",
     "pavement marking", "signing", "work zone", "maintenance of traffic",
     "maintenance and protection of traffic", "construction inspection",

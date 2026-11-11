@@ -98,20 +98,29 @@ def check_html(url, must_contain=None, min_rows=1, row_sel=None, label=""):
 
 
 def check_mta():
-    """MTA sits behind Akamai, which 403s datacenter IPs (like a cloud runner)
-    but NOT the home self-hosted runner where the real pipeline runs. So a 403
-    here usually means 'this check ran from a blocked IP', not 'MTA is broken'.
-    Report it as SUSPICIOUS with that context rather than hard BROKEN."""
-    url = ("https://www.mta.info/agency/construction-and-development/"
-           "contracting/current-opportunities")
+    """MTA sits behind Akamai bot detection. Rather than do a separate probe
+    (which Akamai may 403 differently than the real scraper), call the ACTUAL
+    production fetch_mta() and judge by what it returns. This tests the real
+    code path, so a green here means the real pipeline can reach MTA."""
     try:
-        r = _req(url, timeout=40)
-        if r.status_code == 200 and "opportunit" in r.text.lower():
-            return OK, f"loaded ({len(r.text)} chars)"
+        from rfx_alert import fetch_mta
+        rows = fetch_mta()
+        # fetch_mta prints "[MTA] error: ..." and returns [] on failure. A
+        # non-empty list means it reached and parsed the page. An empty list is
+        # ambiguous (could be genuinely no matches), so do a bare fetch to tell
+        # "reached but 0 matches" from "blocked".
+        if rows:
+            return OK, f"fetch_mta() returned {len(rows)} solicitations"
+        # empty — probe the raw page to distinguish quiet vs blocked
+        import rfx_alert
+        r = _req(rfx_alert.MTA_URL, timeout=40)
+        if r.status_code == 200:
+            return OK, "page reachable (fetch_mta returned 0 — quiet)"
         if r.status_code in (403, 429):
-            return SUS, (f"HTTP {r.status_code} (Akamai IP-block — expected from "
-                         f"a cloud IP; fine on the home runner)")
-        return SUS, f"HTTP {r.status_code} / unexpected content"
+            return SUS, (f"HTTP {r.status_code} Akamai block — if the real "
+                         f"digest still gets MTA items, ignore; if not, MTA is "
+                         f"blocking this runner's IP")
+        return SUS, f"HTTP {r.status_code}"
     except Exception as e:
         return BROKEN, f"{type(e).__name__}: {e}"
 
@@ -176,7 +185,7 @@ def build_checks():
         ("NYS Contract Reporter", lambda: check_html(
             "https://www.nyscr.ny.gov/Ads/Search?Skip=0&Status=Open&Keyword="
             "&DateFilter=All&Categories%5B%5D=5&Counties%5B%5D=53&Top=50"
-            "&Sort=Category", min_rows=0, must_contain="nyscr")),
+            "&Sort=Category", min_rows=1)),
         ("Nassau County", lambda: check_html(
             "https://apex5.nassaucountyny.gov/ords/f?p=533:226", min_rows=1)),
         ("MTA C&D", lambda: check_mta()),

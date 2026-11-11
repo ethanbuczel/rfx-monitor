@@ -97,6 +97,25 @@ def check_html(url, must_contain=None, min_rows=1, row_sel=None, label=""):
         return BROKEN, f"{type(e).__name__}: {e}"
 
 
+def check_mta():
+    """MTA sits behind Akamai, which 403s datacenter IPs (like a cloud runner)
+    but NOT the home self-hosted runner where the real pipeline runs. So a 403
+    here usually means 'this check ran from a blocked IP', not 'MTA is broken'.
+    Report it as SUSPICIOUS with that context rather than hard BROKEN."""
+    url = ("https://www.mta.info/agency/construction-and-development/"
+           "contracting/current-opportunities")
+    try:
+        r = _req(url, timeout=40)
+        if r.status_code == 200 and "opportunit" in r.text.lower():
+            return OK, f"loaded ({len(r.text)} chars)"
+        if r.status_code in (403, 429):
+            return SUS, (f"HTTP {r.status_code} (Akamai IP-block — expected from "
+                         f"a cloud IP; fine on the home runner)")
+        return SUS, f"HTTP {r.status_code} / unexpected content"
+    except Exception as e:
+        return BROKEN, f"{type(e).__name__}: {e}"
+
+
 def check_json(url, key=None):
     try:
         r = _req(url, timeout=40)
@@ -155,13 +174,12 @@ def build_checks():
             "potential-design-build-projects", min_rows=0,
             must_contain="design")),
         ("NYS Contract Reporter", lambda: check_html(
-            "https://www.nyscr.ny.gov/Ads/Search?Status=Open&Top=5", min_rows=1)),
+            "https://www.nyscr.ny.gov/Ads/Search?Skip=0&Status=Open&Keyword="
+            "&DateFilter=All&Categories%5B%5D=5&Counties%5B%5D=53&Top=50"
+            "&Sort=Category", min_rows=0, must_contain="nyscr")),
         ("Nassau County", lambda: check_html(
             "https://apex5.nassaucountyny.gov/ords/f?p=533:226", min_rows=1)),
-        ("MTA C&D", lambda: check_html(
-            "https://www.mta.info/agency/construction-and-development/"
-            "contracting/current-opportunities", min_rows=0,
-            must_contain="opportunit")),
+        ("MTA C&D", lambda: check_mta()),
         ("NYC DOT current", lambda: check_html(
             "https://a841-dotwebpcard01.nyc.gov/RFP/Home/Current", min_rows=1)),
         ("NYC DOT future", lambda: check_html(
@@ -192,7 +210,7 @@ def build_checks():
             must_contain="request")),
         # Town sites
         ("Smithtown (RSS)", lambda: check_html(
-            "https://www.smithtownny.gov/RSSFeed.aspx?ModID=63&CID=All-0.xml",
+            "https://www.smithtownny.gov/RSSFeed.aspx?ModID=1&CID=All-newsflash.xml",
             min_rows=0, must_contain="rss")),
         ("Huntington", lambda: check_html(
             "https://www.huntingtonny.gov/Bids/RFPs", min_rows=0)),

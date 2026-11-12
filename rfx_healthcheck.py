@@ -125,6 +125,21 @@ def check_mta():
         return BROKEN, f"{type(e).__name__}: {e}"
 
 
+def check_via_fetch(fn_name, module="rfx_alert", label=""):
+    """Check a source by calling its real production fetch function. Reaching +
+    parsing the page (returning a list without erroring) = OK. This tests the
+    actual code path, so it can't disagree with the real pipeline."""
+    try:
+        mod = __import__(module)
+        fn = getattr(mod, fn_name)
+        rows = fn()
+        if rows:
+            return OK, f"{fn_name}() returned {len(rows)} items"
+        return OK, f"{fn_name}() ran cleanly (0 items — quiet)"
+    except Exception as e:
+        return BROKEN, f"{fn_name}() failed: {type(e).__name__}: {e}"
+
+
 def check_json(url, key=None):
     try:
         r = _req(url, timeout=40)
@@ -182,10 +197,7 @@ def build_checks():
             "https://www.dot.ny.gov/main/business-center/"
             "potential-design-build-projects", min_rows=0,
             must_contain="design")),
-        ("NYS Contract Reporter", lambda: check_html(
-            "https://www.nyscr.ny.gov/Ads/Search?Skip=0&Status=Open&Keyword="
-            "&DateFilter=All&Categories%5B%5D=5&Counties%5B%5D=53&Top=50"
-            "&Sort=Category", min_rows=1)),
+        ("NYS Contract Reporter", lambda: check_via_fetch("fetch_nyscr")),
         ("Nassau County", lambda: check_html(
             "https://apex5.nassaucountyny.gov/ords/f?p=533:226", min_rows=1)),
         ("MTA C&D", lambda: check_mta()),

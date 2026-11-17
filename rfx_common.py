@@ -40,7 +40,7 @@ PHRASE_KEYWORDS = [
 
 # Short ALL-CAPS acronyms — matched on word boundaries so we don't hit, e.g.,
 # "its" inside "limits" or "mot" inside "motor".
-ACRONYM_KEYWORDS = ["ITS", "MOT", "MPT", "WZTC", "CEI", "VMS", "PVMS", "TMC", "RWIS", "ADA"]
+ACRONYM_KEYWORDS = ["ITS", "MOT", "MPT", "WZTC", "CEI", "VMS", "PVMS", "TMC", "RWIS", "ADA", "APS"]
 _ACRONYM_RE = re.compile(r"\b(" + "|".join(ACRONYM_KEYWORDS) + r")\b")
 
 # Whole-word keywords — case-insensitive but boundary-checked, so "bridge"

@@ -187,11 +187,132 @@ def scrape_westchester_county_portal() -> list[dict]:
     return out
 
 
+# How many days back a Tarrytown village-site posting can be and still be
+# treated as "probably open" when it shows no inline due date. Tunable.
+TARRYTOWN_LOOKBACK_DAYS = 90
+
+
+def scrape_tarrytown_village() -> list[dict]:
+    """Village of Tarrytown's OWN bids page, as a BACKSTOP to the BidNet
+    'villageoftarrytown' feed — in case the village ever posts something only to
+    its own site. (Ethan's home town; worth full coverage.)
+
+    The page (Granicus/CivicPlus) is a single chronological list with one entry
+    per line, formatted 'MM/DD/YYYY: Title' where the leading date is the POSTING
+    date. There are no Open/Closed labels and due dates are inconsistent, so:
+      - if an inline due date is shown and it's in the past  -> skip (closed)
+      - if an inline due date is shown and it's today/future -> keep (open)
+      - if NO due date is shown -> keep only if posted within TARRYTOWN_LOOKBACK_DAYS
+    Dedup against the BidNet feed happens in rfx_alert's final (title, url) pass;
+    an item carried by BOTH may still appear twice if the titles differ — rare,
+    and the NEW flag makes it obvious.
+    """
+    import datetime as _dt
+    out = []
+    url = "https://www.tarrytownny.gov/home/pages/bids-rfps-rfqs"
+    today = _dt.date.today()
+    n_entries = n_recent = 0
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=25)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Anchor text -> absolute href, so we can attach the entry's PDF/detail
+        # link when its title maps to a link; else we fall back to the bids page.
+        anchors = []
+        for a in soup.find_all("a", href=True):
+            atext = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
+            href = a["href"]
+            if href.startswith("/"):
+                href = "https://www.tarrytownny.gov" + href
+            if atext:
+                anchors.append((atext, href))
+
+        # Each listing is a line like "06/27/2025: RFP for ...". Scan text lines.
+        entry_re = re.compile(r"^\s*(\d{1,2}/\d{1,2}/\d{2,4})\s*[:\-]\s*(.+)$")
+        due_re = re.compile(
+            r"due[:\s]*((?:[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s*\d{4})"
+            r"|(?:\d{1,2}/\d{1,2}/\d{2,4}))", re.I)
+        seen = set()
+        for raw in soup.get_text("\n").split("\n"):
+            line = re.sub(r"\s+", " ", raw).strip()
+            m = entry_re.match(line)
+            if not m:
+                continue
+            n_entries += 1
+            posted_str, title = m.group(1), m.group(2).strip()
+            # Trim a trailing "... BIDS DUE: <date>" / "Due: <date>" clause off
+            # the title (the due date is parsed separately from the full line).
+            title = re.split(r"\s+(?:bids?\s+)?due\b", title, maxsplit=1,
+                             flags=re.I)[0].strip(" -–—·:,")
+            if not title or len(title) < 6:
+                continue
+
+            posted = None
+            for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+                try:
+                    posted = _dt.datetime.strptime(posted_str, fmt).date()
+                    break
+                except ValueError:
+                    continue
+
+            # Inline due date, if any.
+            due = "Unknown"
+            due_date = None
+            dm = due_re.search(line)
+            if dm:
+                due = dm.group(1).strip()
+                for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y",
+                            "%m/%d/%Y", "%m/%d/%y"):
+                    try:
+                        due_date = _dt.datetime.strptime(
+                            due.replace(",", ""), fmt.replace(",", "")).date()
+                        break
+                    except ValueError:
+                        continue
+
+            # Open/closed decision.
+            if due_date is not None:
+                if due_date < today:
+                    continue                      # closed
+            else:
+                if posted is None or (today - posted).days > TARRYTOWN_LOOKBACK_DAYS:
+                    continue                      # too old to assume still open
+            n_recent += 1
+
+            if not matches(title):
+                continue
+            key = title.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            link = url
+            for atext, href in anchors:
+                if atext in title or title in atext:
+                    link = href
+                    break
+            out.append(result(SOURCE_WESTCHESTER, "Village of Tarrytown",
+                              title, link, date=posted_str, due=due))
+    except Exception as e:
+        print(f"[Tarrytown Village] Error: {e}")
+
+    import os as _os
+    if _os.environ.get("DIAG"):
+        print(f"[Westchester DIAG] Tarrytown Village site: {len(out)} match(es) "
+              f"| {n_entries} dated entries parsed, {n_recent} open/recent "
+              f"before keyword filter, from {url}")
+        for r in out[:5]:
+            print(f"    - {r['title']}  (posted {r['date']}, due {r['due']})")
+    return out
+
+
 def scrape_westchester_all() -> list[dict]:
     out = []
     for name, slug in WESTCHESTER_BIDNET:
         out += scrape_bidnet_agency(name, slug, SOURCE_WESTCHESTER)
     out += scrape_westchester_county_portal()
+    out += scrape_tarrytown_village()
     return out
 
 

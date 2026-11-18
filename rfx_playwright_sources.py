@@ -33,6 +33,42 @@ def keyword_match(text: str) -> bool:
     return any(k.lower() in t for k in KEYWORDS)
 
 
+# ─── Bonfire tuning ───────────────────────────────────────────────────────────
+# The Bonfire LIST view omits Department and Close Date, so (when enabled) each
+# matched opportunity's detail page is loaded to pull Department, Close Date and
+# Status. Costs ~1 page load per matched item (~1-2 min for PANYNJ). Set False
+# to skip it entirely — the digest still gets every opportunity, just with
+# "Due: Unknown" and no department shown.
+BONFIRE_ENRICH = True
+# Optional department allow-list. None = show every department (recommended:
+# hard-filtering risks dropping relevant work filed under another department).
+# To restrict later, set e.g. {"Professional Technical & Advisory Services"}.
+BONFIRE_DEPARTMENTS = None
+
+_BONFIRE_BOILERPLATE = [
+    r"Request\s+for\s+Proposals?\s+for\s+(?:the\s+)?Performance\s+of\s+Expert\s+Professional\s+",
+    r"Request\s+for\s+Proposals?\s+for\s+(?:the\s+)?Performance\s+of\s+",
+    r"Request\s+for\s+Proposals?\s+for\s+",
+    r"Invitation\s+for\s+Bids?\s+for\s+",
+]
+
+
+def _shorten_bonfire_title(title: str) -> str:
+    """Trim PANYNJ's verbose RFP boilerplate while keeping the ref # and the
+    real subject. Returns the original if trimming would empty it."""
+    t = title
+    for pat in _BONFIRE_BOILERPLATE:
+        t = re.sub(pat, "", t, flags=re.I)
+    # Drop trailing "as requested on a '...' basis during 20xx..." clauses.
+    t = re.sub(r"\s+as\s+requested\s+on\s+an?\b.*$", "", t, flags=re.I)
+    t = re.sub(r"\s*[-–—]\s*Two\s*\(?\s*2\s*\)?\s*Years?\s+Requirements?\s+Contract.*$",
+               "", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" -–—,")
+    if len(t) > 110:
+        t = t[:107].rstrip(" -–—,") + "..."
+    return t or title
+
+
 # ─── 1. PANYNJ Bonfire ────────────────────────────────────────────────────────
 
 async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
@@ -181,27 +217,120 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
                 continue
             cand = [t for t in texts
                     if t.lower() not in ("view opportunity", "view", "open")]
-            title = max(cand, key=len) if cand else full
-            title = re.sub(r"\bview opportunity\b", "", title, flags=re.I).strip()
+            raw_title = max(cand, key=len) if cand else full
+            raw_title = re.sub(r"\bview opportunity\b", "", raw_title,
+                               flags=re.I).strip()
+            title = _shorten_bonfire_title(raw_title)
+            # List view rarely carries a parseable date; detail enrichment below
+            # fills it in. Still try here in case a date is present (ordinals ok).
+            date = ""
             dm = re.search(
                 r"(\d{1,2}/\d{1,2}/\d{2,4}"
-                r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s+\d{4})", full)
-            date = dm.group(1) if dm else ""
+                r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})", full)
+            if dm:
+                date = re.sub(r"(\d{1,2})(?:st|nd|rd|th)", r"\1", dm.group(1))
             if title and len(title) > 4:
                 results.append({
                     "title": title[:200],
                     "agency": source,
                     "date": date,
                     "due": date or "Unknown",
+                    "extra": "",
                     "url": href or portal_url,
                 })
 
+        # ── Detail enrichment: pull Department / Close Date / Status from each
+        #    matched opportunity's detail page (the list view omits them).
+        #    Fail-safe: any error leaves the item as-is. Drops an item only on a
+        #    confidently-parsed past close date, an explicit closed status, or a
+        #    department excluded by BONFIRE_DEPARTMENTS.
+        if BONFIRE_ENRICH and results:
+            import datetime as _dt
+            today = _dt.date.today()
+            n_due = n_dept = 0
+            kept = []
+            for it in results:
+                dept = status = close_raw = ""
+                try:
+                    await page.goto(it["url"], timeout=20000,
+                                    wait_until="domcontentloaded")
+                    try:
+                        await page.wait_for_selector("text=/Close Date/i",
+                                                     timeout=8000)
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(300)
+                    body = re.sub(r"[ \t]+", " ",
+                                  (await page.inner_text("body")) or "")
+
+                    # Clip a captured value at the next field label, so a value
+                    # stays clean whether the detail page renders label/value on
+                    # one line or separate lines.
+                    def _clip(v):
+                        return re.split(
+                            r"\s*(?:Type|Status|Open Date|Close Date|Closing Date"
+                            r"|Intent to Bid|Days Left|Ref\.?\s*#|Contact"
+                            r"|Commodity|Project)\s*:",
+                            v, maxsplit=1)[0].strip()
+
+                    m = re.search(r"Department:\s*([^\n]+)", body)
+                    if m:
+                        dept = _clip(m.group(1))[:70]
+                    m = re.search(r"Status:\s*([A-Za-z]+)", body)
+                    if m:
+                        status = m.group(1).strip().lower()
+                    m = (re.search(r"Close Date:\s*([^\n]+)", body)
+                         or re.search(r"Closing Date:\s*([^\n]+)", body))
+                    if m:
+                        close_raw = _clip(m.group(1))
+                except Exception:
+                    pass
+
+                due_date = None
+                if close_raw:
+                    cr = re.sub(r"(\d{1,2})(?:st|nd|rd|th)", r"\1", close_raw)
+                    dm = (re.search(r"[A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4}", cr)
+                          or re.search(r"\d{1,2}/\d{1,2}/\d{2,4}", cr))
+                    if dm:
+                        it["due"] = dm.group(0)
+                        for fmt in ("%b %d %Y", "%B %d %Y", "%m/%d/%Y", "%m/%d/%y"):
+                            try:
+                                due_date = _dt.datetime.strptime(
+                                    re.sub(r",", "", dm.group(0)), fmt).date()
+                                break
+                            except ValueError:
+                                continue
+                if it.get("due", "Unknown") not in ("", "Unknown"):
+                    n_due += 1
+                if dept:
+                    it["extra"] = dept
+                    it["department"] = dept
+                    n_dept += 1
+
+                # Optional department allow-list (only applies when parsed).
+                if (BONFIRE_DEPARTMENTS is not None and dept
+                        and dept not in BONFIRE_DEPARTMENTS):
+                    continue
+                if status in ("closed", "archived", "awarded", "cancelled",
+                              "canceled", "expired"):
+                    continue
+                if due_date is not None and due_date < today:
+                    continue
+                kept.append(it)
+            results[:] = kept
+
         if _os.environ.get("DIAG"):
+            n_due = sum(1 for r in results
+                        if r.get("due", "Unknown") not in ("", "Unknown"))
+            n_dept = sum(1 for r in results if r.get("department"))
             print(f"[{diag_tag} DIAG] anchors={n_anchors} "
-                  f"rows_with_text={len(harvested)} matched={len(results)}")
-            for r in results:
+                  f"rows_with_text={len(harvested)} matched={len(results)} "
+                  f"with_due={n_due} with_dept={n_dept}")
+            for r in results[:10]:
                 oid = r["url"].rstrip("/").split("/")[-1]
-                print(f"    MATCH {oid}: {r['title'][:95]!r}")
+                print(f"    {oid} | due={r.get('due')} "
+                      f"| dept={r.get('department', '')[:32]!r} "
+                      f"| {r['title'][:70]!r}")
     except PWTimeout:
         print(f"[{diag_tag}] Timed out waiting for content")
     except Exception as e:

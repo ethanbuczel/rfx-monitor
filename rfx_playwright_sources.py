@@ -108,52 +108,100 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
                 if len(t) >= 3:
                     print(f"    {t[:70]!r} -> {h[:70]}")
 
-        rows = await page.query_selector_all("table tr")
-        for row in rows:
-            link = await row.query_selector("a[href*='/opportunities/']")
-            if not link:
+        # Prefer the SHARED pipeline matcher so Bonfire filters identically to
+        # every other source. The old local KEYWORDS list silently diverged —
+        # it lacked "engineering services", "APS", the signal phrases, etc. —
+        # and quietly dropped relevant PANYNJ/Nassau work for a primary client.
+        try:
+            from rfx_common import matches as _match
+        except Exception:
+            _match = keyword_match
+
+        # Bonfire's table lazily lays out row text: off-screen rows keep their
+        # /opportunities/ link in the DOM but report EMPTY inner_text(), so a
+        # single read only ever saw the ~dozen on-screen rows (a different dozen
+        # each run — which is why the same open RFP kept vanishing between runs).
+        # Fix: (a) read text_content() instead of inner_text() — it returns the
+        # text even when a row isn't laid out; (b) scroll through the whole list
+        # re-harvesting, keyed by href so each opportunity is captured once.
+        harvested = {}   # href -> (full_text, cell_texts)
+
+        async def _harvest():
+            for row in await page.query_selector_all("table tr"):
+                link = await row.query_selector("a[href*='/opportunities/']")
+                if not link:
+                    continue
+                href = await link.get_attribute("href") or ""
+                if href and not href.startswith("http"):
+                    href = base_url + href
+                texts = []
+                for c in await row.query_selector_all("td"):
+                    t = re.sub(r"\s+", " ", (await c.text_content()) or "").strip()
+                    if t:
+                        texts.append(t)
+                full = " ".join(texts)
+                if len(full) < 15:
+                    full = re.sub(r"\s+", " ",
+                                  (await row.text_content()) or "").strip()
+                if len(full) < 15:
+                    continue
+                # Keep the richest text seen for this opportunity.
+                if href not in harvested or len(full) > len(harvested[href][0]):
+                    harvested[href] = (full, texts)
+
+        n_anchors = len(await page.query_selector_all("a[href*='/opportunities/']"))
+        last, stable = -1, 0
+        for _ in range(40):
+            await _harvest()
+            if n_anchors and len(harvested) >= n_anchors:
+                break
+            # Nudge the next chunk of rows into layout.
+            try:
+                tr = await page.query_selector_all("table tr")
+                if tr:
+                    await tr[-1].scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+            try:
+                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            except Exception:
+                pass
+            await page.wait_for_timeout(500)
+            n_anchors = max(n_anchors, len(
+                await page.query_selector_all("a[href*='/opportunities/']")))
+            if len(harvested) == last:
+                stable += 1
+                if stable >= 4:
+                    break
+            else:
+                stable, last = 0, len(harvested)
+
+        for href, (full, texts) in harvested.items():
+            if not _match(full):
                 continue
-            href = await link.get_attribute("href") or ""
-            if href and not href.startswith("http"):
-                href = base_url + href
-            cells = await row.query_selector_all("td")
-            texts = [((await c.inner_text()).strip()) for c in cells]
-            full = " ".join(t for t in texts if t)
-            # If the row's cells are empty (some Bonfire portals render the
-            # title outside <td>), fall back to the row's whole inner_text and
-            # the link's aria-label/title attributes.
-            if len(full) < 15:
-                full = re.sub(r"\s+", " ", (await row.inner_text()).strip())
-            if len(full) < 15:
-                aria = (await link.get_attribute("aria-label")) or ""
-                titl = (await link.get_attribute("title")) or ""
-                full = f"{aria} {titl}".strip()
             cand = [t for t in texts
-                    if t and t.lower() not in ("view opportunity", "view", "open")]
+                    if t.lower() not in ("view opportunity", "view", "open")]
             title = max(cand, key=len) if cand else full
-            title = re.sub(r"\bview opportunity\b", "", title,
-                           flags=re.I).strip()
+            title = re.sub(r"\bview opportunity\b", "", title, flags=re.I).strip()
             dm = re.search(
                 r"(\d{1,2}/\d{1,2}/\d{2,4}"
                 r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s+\d{4})", full)
             date = dm.group(1) if dm else ""
-            if title and len(title) > 4 and keyword_match(full):
+            if title and len(title) > 4:
                 results.append({
                     "title": title[:200],
                     "agency": source,
                     "date": date,
+                    "due": date or "Unknown",
                     "url": href or portal_url,
                 })
 
         if _os.environ.get("DIAG"):
-            print(f"[{diag_tag} DIAG] matched={len(results)}; row samples:")
-            shown = 0
-            for row in rows:
-                lk = await row.query_selector("a[href*='/opportunities/']")
-                if lk and shown < 6:
-                    rt = re.sub(r"\s+", " ", (await row.inner_text()).strip())
-                    print(f"    row[{shown}] {rt[:110]!r}")
-                    shown += 1
+            print(f"[{diag_tag} DIAG] anchors={n_anchors} "
+                  f"rows_with_text={len(harvested)} matched={len(results)}")
+            for r in results:
+                oid = r["url"].rstrip("/").split("/")[-1]
+                print(f"    MATCH {oid}: {r['title'][:95]!r}")
     except PWTimeout:
         print(f"[{diag_tag}] Timed out waiting for content")
     except Exception as e:
@@ -441,6 +489,11 @@ async def scrape_nassau(pw) -> list[dict]:
                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
     page = await ctx.new_page()
+    # Use the shared pipeline matcher, not the narrow local KEYWORDS list.
+    try:
+        from rfx_common import matches as _match
+    except Exception:
+        _match = keyword_match
     try:
         # Nassau County formal solicitations — Oracle APEX app
         await page.goto(
@@ -458,7 +511,7 @@ async def scrape_nassau(pw) -> list[dict]:
                 continue
             texts = [(await c.inner_text()).strip() for c in cells]
             full = " ".join(texts)
-            if not keyword_match(full):
+            if not _match(full):
                 continue
             link_el = await row.query_selector("a")
             href = await link_el.get_attribute("href") if link_el else ""

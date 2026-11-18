@@ -69,6 +69,26 @@ def _shorten_bonfire_title(title: str) -> str:
     return t or title
 
 
+# Commodity / goods-procurement bids (supply, deliver, rent equipment) are not
+# design/engineering work, so they're dropped (unless they also carry a design/
+# construction scope word). Set BONFIRE_DROP_COMMODITY=False to keep them.
+BONFIRE_DROP_COMMODITY = True
+_COMMODITY_RE = re.compile(
+    r"\b(supply\s+and\s+deliver|supply\s*&\s*deliver|furnish\s+and\s+deliver"
+    r"|purchase\s+of|procurement\s+of)\b", re.I)
+_NONCOMMODITY_RE = re.compile(
+    r"\b(design|engineering\s+services|planning|inspection|study|construction"
+    r"|consultant|professional\s+services|repair|rehabilitation)\b", re.I)
+
+
+def _bonfire_is_commodity(title: str, dept: str = "") -> bool:
+    """True for goods/equipment procurement (not design work). A design or
+    construction scope word anywhere in the title overrides it."""
+    if "commodit" in (dept or "").lower():
+        return True
+    return bool(_COMMODITY_RE.search(title)) and not _NONCOMMODITY_RE.search(title)
+
+
 # ─── 1. PANYNJ Bonfire ────────────────────────────────────────────────────────
 
 async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
@@ -221,6 +241,9 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
             raw_title = re.sub(r"\bview opportunity\b", "", raw_title,
                                flags=re.I).strip()
             title = _shorten_bonfire_title(raw_title)
+            # Drop commodity/goods bids up front (also saves a detail fetch).
+            if BONFIRE_DROP_COMMODITY and _bonfire_is_commodity(raw_title):
+                continue
             # List view rarely carries a parseable date; detail enrichment below
             # fills it in. Still try here in case a date is present (ordinals ok).
             date = ""
@@ -247,7 +270,7 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
         if BONFIRE_ENRICH and results:
             import datetime as _dt
             today = _dt.date.today()
-            n_due = n_dept = 0
+            _dumped = False
             kept = []
             for it in results:
                 dept = status = close_raw = ""
@@ -263,6 +286,13 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
                     body = re.sub(r"[ \t]+", " ",
                                   (await page.inner_text("body")) or "")
 
+                    # One-time raw dump so we can see the exact label format the
+                    # detail page uses (Department came back empty last run).
+                    if _os.environ.get("DIAG") and not _dumped:
+                        _dumped = True
+                        snap = re.sub(r"\n{2,}", "\n", body)[:700]
+                        print(f"[{diag_tag} DETAIL DUMP] {it['url']}\n{snap!r}")
+
                     # Clip a captured value at the next field label, so a value
                     # stays clean whether the detail page renders label/value on
                     # one line or separate lines.
@@ -273,18 +303,25 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
                             r"|Commodity|Project)\s*:",
                             v, maxsplit=1)[0].strip()
 
-                    m = re.search(r"Department:\s*([^\n]+)", body)
+                    # Colon optional — some labels render the colon via CSS, so
+                    # inner_text may read "Department\nProfessional Technical…".
+                    m = re.search(r"Department\b\s*:?\s*([^\n]+)", body)
                     if m:
                         dept = _clip(m.group(1))[:70]
-                    m = re.search(r"Status:\s*([A-Za-z]+)", body)
+                    m = re.search(r"Status\b\s*:?\s*([A-Za-z]+)", body)
                     if m:
                         status = m.group(1).strip().lower()
-                    m = (re.search(r"Close Date:\s*([^\n]+)", body)
-                         or re.search(r"Closing Date:\s*([^\n]+)", body))
+                    m = (re.search(r"Close\s+Date\b\s*:?\s*([^\n]+)", body)
+                         or re.search(r"Closing\s+Date\b\s*:?\s*([^\n]+)", body))
                     if m:
                         close_raw = _clip(m.group(1))
                 except Exception:
                     pass
+
+                # Commodity by department (e.g. "Commodity/Services") — drop.
+                if BONFIRE_DROP_COMMODITY and _bonfire_is_commodity(
+                        it["title"], dept):
+                    continue
 
                 due_date = None
                 if close_raw:
@@ -300,12 +337,9 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
                                 break
                             except ValueError:
                                 continue
-                if it.get("due", "Unknown") not in ("", "Unknown"):
-                    n_due += 1
                 if dept:
                     it["extra"] = dept
                     it["department"] = dept
-                    n_dept += 1
 
                 # Optional department allow-list (only applies when parsed).
                 if (BONFIRE_DEPARTMENTS is not None and dept

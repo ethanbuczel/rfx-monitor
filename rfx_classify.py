@@ -73,7 +73,43 @@ SHARED_LISTING_URLS = (
     "bidnetdirect.com",            # bot-blocks fetches AND locks description
                                    # behind login — returns a useless shell, so
                                    # judge from the (clean) title instead
+    "bonfirehub.com",              # PANYNJ/Suffolk Bonfire detail pages sit
+                                   # behind Cloudflare — a fetch returns a "Just
+                                   # a moment" challenge page, not scope, so skip
+                                   # it and judge from the (clean) title instead
 )
+
+
+# Titles containing one of these unambiguous traffic/engineering phrases are GPI
+# scope with near-certainty. When the LLM can only see the title and hedges to
+# "unknown", we deterministically upgrade such a title to "relevant" — so two
+# near-identical engineering titles can't get different verdicts (the bug where
+# a "(Small Business Enterprises)" suffix flipped one of a pair to "unknown").
+# Commodity/goods titles are excluded so a "supply traffic signals" purchase
+# isn't wrongly upgraded.
+_STRONG_RELEVANT = (
+    "traffic engineering", "transportation engineering", "traffic signal",
+    "signalization", "signal timing", "signal system", "adaptive signal",
+    "pavement marking", "signing and striping", "signing and pavement",
+    "maintenance and protection of traffic", "maintenance of traffic",
+    "work zone traffic", "transportation planning", "roadway design",
+    "highway design", "bridge design", "construction inspection",
+    "resident engineering", "intelligent transportation", "complete streets",
+    "traffic calming", "corridor study", "traffic study", "safety study",
+    "construction and operations support",
+)
+_CLASSIFY_COMMODITY_RE = re.compile(
+    r"\b(supply\s+and\s+deliver|furnish\s+and\s+deliver|purchase\s+of"
+    r"|procurement\s+of|rental)\b", re.I)
+
+
+def _strong_relevant(title: str) -> bool:
+    """True when the title alone unambiguously names GPI traffic/engineering
+    scope (and is not a goods/commodity purchase)."""
+    t = (title or "").lower()
+    if _CLASSIFY_COMMODITY_RE.search(t):
+        return False
+    return any(p in t for p in _STRONG_RELEVANT)
 
 
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
@@ -187,7 +223,13 @@ def _traffic_prompt(context: str) -> str:
         "drainage with municipal water/sewer UTILITY treatment — highway "
         "drainage manages roadway runoff and is core roadway design. If the "
         "issuing agency is a DOT or the work class is Highway, drainage work "
-        "is RELEVANT.\n\n"
+        "is RELEVANT.\n"
+        "- A set-aside / eligibility qualifier in the title — '(Small Business "
+        "Enterprises)', '(SBE)', '(DBE)', '(MBE)', '(WBE)', '(M/WBE)', 'Small "
+        "Business' — describes WHO may bid, NOT the work scope. IGNORE it when "
+        "judging relevance; judge only by the engineering scope words. Two "
+        "titles that differ only by such a qualifier must get the SAME "
+        "verdict.\n\n"
         "RELEVANT examples: traffic signals/signalization, signing and "
         "pavement markings, maintenance and protection of traffic (MOT/MPT/"
         "WZTC), traffic and safety studies, corridor/intersection work, ITS, "
@@ -334,7 +376,7 @@ def classify_results(results: list[dict]) -> list[dict]:
         print(f"[classify] batch failed ({e}) — leaving items unannotated.")
         return results
 
-    n_notrel = n_rel = n_rescued = n_sub = 0
+    n_notrel = n_rel = n_rescued = n_sub = n_strong = 0
     for idx, (verdict, reason, had_detail, is_sub) in verdicts.items():
         item = results[idx]
         # SAFEGUARD: never filter out an item the AI could only see the TITLE of.
@@ -345,6 +387,18 @@ def classify_results(results: list[dict]) -> list[dict]:
         if verdict == "not_relevant" and not had_detail:
             verdict = "unknown"
             n_rescued += 1
+
+        # DETERMINISTIC CONSISTENCY: if the title itself names unambiguous
+        # traffic/engineering scope but the LLM only reached "unknown" (common on
+        # title-only items, and the cause of two near-identical titles getting
+        # different tags), upgrade to "relevant" so the verdict is stable. Only
+        # touches "unknown" — a confident "not_relevant" read from a real detail
+        # page is left alone.
+        if verdict == "unknown" and _strong_relevant(item.get("title", "")):
+            verdict = "relevant"
+            if not reason:
+                reason = "clear traffic/engineering scope in title"
+            n_strong += 1
 
         # Sub/field-work note: a prime advertising for a field-work sub (coring,
         # boring, etc.) STAYS in the main view (you asked to keep these), but we
@@ -386,6 +440,7 @@ def classify_results(results: list[dict]) -> list[dict]:
           f"{n_notrel} not-relevant, "
           f"{len(results) - n_rel - n_notrel} unmarked, of {len(results)}"
           + (f" ({n_rescued} title-only kept in main view)" if n_rescued else "")
+          + (f" ({n_strong} upgraded by strong-title rule)" if n_strong else "")
           + (f" [{n_sub} flagged sub/field-work]" if n_sub else "")
           + ".")
     return results

@@ -191,6 +191,24 @@ def scrape_westchester_county_portal() -> list[dict]:
 # treated as "probably open" when it shows no inline due date. Tunable.
 TARRYTOWN_LOOKBACK_DAYS = 90
 
+# The village site (Granicus/govAccess) 403s a bare request — it wants a full
+# browser-looking header set. This is a best-effort attempt to look like a real
+# Chrome navigation; if the site uses a JS challenge (Imperva/Incapsula), this
+# won't be enough and the source would need to move to Playwright instead.
+TARRYTOWN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+              "image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.tarrytownny.gov/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+}
+
 
 def scrape_tarrytown_village() -> list[dict]:
     """Village of Tarrytown's OWN bids page, as a BACKSTOP to the BidNet
@@ -212,9 +230,21 @@ def scrape_tarrytown_village() -> list[dict]:
     url = "https://www.tarrytownny.gov/home/pages/bids-rfps-rfqs"
     today = _dt.date.today()
     n_entries = n_recent = 0
+    import os as _os
+    _diag = bool(_os.environ.get("DIAG"))
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=25)
-        resp.raise_for_status()
+        resp = requests.get(url, headers=TARRYTOWN_HEADERS, timeout=25)
+        if resp.status_code != 200:
+            # Don't raise — report what the block looks like so we can tell a
+            # plain 403 (fixable with headers) from a JS challenge (needs a
+            # real browser / Playwright). Then bail cleanly.
+            if _diag:
+                snippet = re.sub(r"\s+", " ", resp.text)[:200]
+                print(f"[Tarrytown Village] HTTP {resp.status_code} — "
+                      f"body[:200]: {snippet!r}")
+            else:
+                print(f"[Tarrytown Village] HTTP {resp.status_code} — skipping.")
+            return []
         soup = BeautifulSoup(resp.text, "html.parser")
 
         # Anchor text -> absolute href, so we can attach the entry's PDF/detail
@@ -297,8 +327,7 @@ def scrape_tarrytown_village() -> list[dict]:
     except Exception as e:
         print(f"[Tarrytown Village] Error: {e}")
 
-    import os as _os
-    if _os.environ.get("DIAG"):
+    if _diag:
         print(f"[Westchester DIAG] Tarrytown Village site: {len(out)} match(es) "
               f"| {n_entries} dated entries parsed, {n_recent} open/recent "
               f"before keyword filter, from {url}")

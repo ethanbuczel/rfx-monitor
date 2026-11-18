@@ -69,12 +69,23 @@ WESTCHESTER_BIDNET = [
     ("Town of Mamaroneck",        "townofmamaroneck"),
     ("City of White Plains",      "cityofwhiteplains"),
     ("Port Chester IDA",          "portchesternyida"),
-    # NOTE: Yonkers, New Rochelle, Mount Vernon, Village of Port Chester, and
-    # Greenburgh all use BidNet too, but their exact URL slugs 404'd (BidNet's
-    # naming isn't consistent — e.g. it's not "cityofyonkers"). They were
-    # removed rather than error every run. To re-add one: find its real slug at
-    # bidnetdirect.com/new-york/participating-buyers, confirm the page loads,
-    # then add ("Name", "slug") here.
+    # Added Nov 2026 — slugs confirmed against live BidNet solicitation URLs
+    # (the buyer slug in a solicitation path is the landing-page slug). These
+    # are the non-obvious slugs that made the earlier guesses 404.
+    ("Village of Port Chester",   "village-of-port-chester"),             # dashed, not "villageofportchester"
+    ("Village of Tarrytown",      "villageoftarrytown"),                  # had On-Call Transportation Planning RFP open
+    ("City of Yonkers",           "city-of-yonkersyonkers-public-schools"),  # combined buyer w/ school district; matches() drops the school-supply noise
+    ("City of Mount Vernon",      "cmvnymanagementservices"),             # posts as "City of Mount Vernon NY Management Services"
+    # STILL MISSING / NOT ON BIDNET:
+    #  - Village of Hastings-on-Hudson: IS on BidNet (joined Empire State
+    #    Purchasing Group) but its exact slug wasn't confirmable from a
+    #    solicitation URL. Grab it from bidnetdirect.com/new-york/participating-buyers
+    #    and add a line here — don't guess (guessing is what 404'd the others).
+    #  - City of New Rochelle: NOT on BidNet — runs its own portal (bids show up
+    #    on constructconnect/bidpulsar, not Empire). Would need a dedicated scraper.
+    #  - Town of Greenburgh: NOT on BidNet — uses the CivicIQ portal (civiciq.com).
+    #    Would need a dedicated scraper. Has real traffic work (pavement markings,
+    #    milling/resurfacing, engineering consultant services).
 ]
 
 

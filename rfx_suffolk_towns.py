@@ -210,130 +210,150 @@ TARRYTOWN_HEADERS = {
 }
 
 
-def scrape_tarrytown_village() -> list[dict]:
-    """Village of Tarrytown's OWN bids page, as a BACKSTOP to the BidNet
-    'villageoftarrytown' feed — in case the village ever posts something only to
-    its own site. (Ethan's home town; worth full coverage.)
+TARRYTOWN_URL = "https://www.tarrytownny.gov/home/pages/bids-rfps-rfqs"
+
+
+def _parse_tarrytown(html: str, diag: bool = False) -> list[dict]:
+    """Parse the Village of Tarrytown bids page HTML.
 
     The page (Granicus/CivicPlus) is a single chronological list with one entry
     per line, formatted 'MM/DD/YYYY: Title' where the leading date is the POSTING
     date. There are no Open/Closed labels and due dates are inconsistent, so:
-      - if an inline due date is shown and it's in the past  -> skip (closed)
-      - if an inline due date is shown and it's today/future -> keep (open)
-      - if NO due date is shown -> keep only if posted within TARRYTOWN_LOOKBACK_DAYS
-    Dedup against the BidNet feed happens in rfx_alert's final (title, url) pass;
-    an item carried by BOTH may still appear twice if the titles differ — rare,
-    and the NEW flag makes it obvious.
+      - inline due date in the past  -> skip (closed)
+      - inline due date today/future -> keep (open)
+      - no due date -> keep only if posted within TARRYTOWN_LOOKBACK_DAYS
+    Dedup against the BidNet feed happens in rfx_alert's final (title, url) pass.
     """
     import datetime as _dt
     out = []
-    url = "https://www.tarrytownny.gov/home/pages/bids-rfps-rfqs"
     today = _dt.date.today()
     n_entries = n_recent = 0
-    import os as _os
-    _diag = bool(_os.environ.get("DIAG"))
-    try:
-        resp = requests.get(url, headers=TARRYTOWN_HEADERS, timeout=25)
-        if resp.status_code != 200:
-            # Don't raise — report what the block looks like so we can tell a
-            # plain 403 (fixable with headers) from a JS challenge (needs a
-            # real browser / Playwright). Then bail cleanly.
-            if _diag:
-                snippet = re.sub(r"\s+", " ", resp.text)[:200]
-                print(f"[Tarrytown Village] HTTP {resp.status_code} — "
-                      f"body[:200]: {snippet!r}")
-            else:
-                print(f"[Tarrytown Village] HTTP {resp.status_code} — skipping.")
-            return []
-        soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
 
-        # Anchor text -> absolute href, so we can attach the entry's PDF/detail
-        # link when its title maps to a link; else we fall back to the bids page.
-        anchors = []
-        for a in soup.find_all("a", href=True):
-            atext = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
-            href = a["href"]
-            if href.startswith("/"):
-                href = "https://www.tarrytownny.gov" + href
-            if atext:
-                anchors.append((atext, href))
+    # Anchor text -> absolute href, to attach each entry's PDF/detail link.
+    anchors = []
+    for a in soup.find_all("a", href=True):
+        atext = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
+        href = a["href"]
+        if href.startswith("/"):
+            href = "https://www.tarrytownny.gov" + href
+        if atext:
+            anchors.append((atext, href))
 
-        # Each listing is a line like "06/27/2025: RFP for ...". Scan text lines.
-        entry_re = re.compile(r"^\s*(\d{1,2}/\d{1,2}/\d{2,4})\s*[:\-]\s*(.+)$")
-        due_re = re.compile(
-            r"due[:\s]*((?:[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s*\d{4})"
-            r"|(?:\d{1,2}/\d{1,2}/\d{2,4}))", re.I)
-        seen = set()
-        for raw in soup.get_text("\n").split("\n"):
-            line = re.sub(r"\s+", " ", raw).strip()
-            m = entry_re.match(line)
-            if not m:
-                continue
-            n_entries += 1
-            posted_str, title = m.group(1), m.group(2).strip()
-            # Trim a trailing "... BIDS DUE: <date>" / "Due: <date>" clause off
-            # the title (the due date is parsed separately from the full line).
-            title = re.split(r"\s+(?:bids?\s+)?due\b", title, maxsplit=1,
-                             flags=re.I)[0].strip(" -–—·:,")
-            if not title or len(title) < 6:
+    entry_re = re.compile(r"^\s*(\d{1,2}/\d{1,2}/\d{2,4})\s*[:\-]\s*(.+)$")
+    due_re = re.compile(
+        r"due[:\s]*((?:[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s*\d{4})"
+        r"|(?:\d{1,2}/\d{1,2}/\d{2,4}))", re.I)
+    seen = set()
+    for raw in soup.get_text("\n").split("\n"):
+        line = re.sub(r"\s+", " ", raw).strip()
+        m = entry_re.match(line)
+        if not m:
+            continue
+        n_entries += 1
+        posted_str, title = m.group(1), m.group(2).strip()
+        title = re.split(r"\s+(?:bids?\s+)?due\b", title, maxsplit=1,
+                         flags=re.I)[0].strip(" -–—·:,")
+        if not title or len(title) < 6:
+            continue
+
+        posted = None
+        for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+            try:
+                posted = _dt.datetime.strptime(posted_str, fmt).date()
+                break
+            except ValueError:
                 continue
 
-            posted = None
-            for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+        due, due_date = "Unknown", None
+        dm = due_re.search(line)
+        if dm:
+            due = dm.group(1).strip()
+            for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y",
+                        "%m/%d/%Y", "%m/%d/%y"):
                 try:
-                    posted = _dt.datetime.strptime(posted_str, fmt).date()
+                    due_date = _dt.datetime.strptime(
+                        due.replace(",", ""), fmt.replace(",", "")).date()
                     break
                 except ValueError:
                     continue
 
-            # Inline due date, if any.
-            due = "Unknown"
-            due_date = None
-            dm = due_re.search(line)
-            if dm:
-                due = dm.group(1).strip()
-                for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y",
-                            "%m/%d/%Y", "%m/%d/%y"):
-                    try:
-                        due_date = _dt.datetime.strptime(
-                            due.replace(",", ""), fmt.replace(",", "")).date()
-                        break
-                    except ValueError:
-                        continue
+        if due_date is not None:
+            if due_date < today:
+                continue                      # closed
+        else:
+            if posted is None or (today - posted).days > TARRYTOWN_LOOKBACK_DAYS:
+                continue                      # too old to assume still open
+        n_recent += 1
 
-            # Open/closed decision.
-            if due_date is not None:
-                if due_date < today:
-                    continue                      # closed
-            else:
-                if posted is None or (today - posted).days > TARRYTOWN_LOOKBACK_DAYS:
-                    continue                      # too old to assume still open
-            n_recent += 1
+        if not matches(title):
+            continue
+        key = title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
 
-            if not matches(title):
-                continue
-            key = title.lower()
-            if key in seen:
-                continue
-            seen.add(key)
+        link = TARRYTOWN_URL
+        for atext, href in anchors:
+            if atext in title or title in atext:
+                link = href
+                break
+        out.append(result(SOURCE_WESTCHESTER, "Village of Tarrytown",
+                          title, link, date=posted_str, due=due))
 
-            link = url
-            for atext, href in anchors:
-                if atext in title or title in atext:
-                    link = href
-                    break
-            out.append(result(SOURCE_WESTCHESTER, "Village of Tarrytown",
-                              title, link, date=posted_str, due=due))
-    except Exception as e:
-        print(f"[Tarrytown Village] Error: {e}")
-
-    if _diag:
+    if diag:
         print(f"[Westchester DIAG] Tarrytown Village site: {len(out)} match(es) "
               f"| {n_entries} dated entries parsed, {n_recent} open/recent "
-              f"before keyword filter, from {url}")
+              f"before keyword filter")
         for r in out[:5]:
             print(f"    - {r['title']}  (posted {r['date']}, due {r['due']})")
     return out
+
+
+async def scrape_tarrytown_village(pw, diag: bool = False) -> list[dict]:
+    """Village of Tarrytown's OWN bids page — backstop to the BidNet
+    'villageoftarrytown' feed, for anything the village posts only to its own
+    site. The site (Granicus) sits behind Cloudflare, so plain requests get a
+    'Just a moment...' JS challenge; this loads it in a real browser and waits
+    for Cloudflare to clear before parsing."""
+    browser = await pw.chromium.launch(headless=True)
+    ctx = await browser.new_context(user_agent=HEADERS["User-Agent"],
+                                    locale="en-US")
+    page = await ctx.new_page()
+    html = ""
+    try:
+        await page.goto(TARRYTOWN_URL, timeout=45000,
+                        wait_until="domcontentloaded")
+        # Wait out Cloudflare's interstitial: it runs a JS check then swaps in
+        # the real page. Poll until the challenge text is gone and real content
+        # has loaded (or we run out of tries).
+        CHALLENGE = ("just a moment", "security verification",
+                     "verify you are human", "checking your browser",
+                     "enable javascript and cookies")
+        for _ in range(8):
+            try:
+                await page.wait_for_load_state("networkidle", timeout=6000)
+            except Exception:
+                pass
+            body = (await page.inner_text("body")) or ""
+            low = body[:500].lower()
+            if (not any(c in low for c in CHALLENGE)
+                    and len(body.strip()) > 120):
+                break
+            await page.wait_for_timeout(2500)
+        html = await page.content()
+        if diag:
+            head = re.sub(r"\s+", " ", (await page.inner_text("body")))[:160]
+            cleared = not any(c in head.lower() for c in CHALLENGE)
+            print(f"[Tarrytown Village] loaded {len(html)} chars; "
+                  f"cloudflare_cleared={cleared}; head={head!r}")
+    except PWTimeout:
+        print("[Tarrytown Village] Timed out")
+    except Exception as e:
+        print(f"[Tarrytown Village] Error: {e}")
+    finally:
+        await browser.close()
+    return _parse_tarrytown(html, diag=diag) if html else []
 
 
 def scrape_westchester_all() -> list[dict]:
@@ -341,7 +361,8 @@ def scrape_westchester_all() -> list[dict]:
     for name, slug in WESTCHESTER_BIDNET:
         out += scrape_bidnet_agency(name, slug, SOURCE_WESTCHESTER)
     out += scrape_westchester_county_portal()
-    out += scrape_tarrytown_village()
+    # NOTE: the Village of Tarrytown site is Cloudflare-protected, so it's
+    # scraped via Playwright in _fetch_playwright_towns (not here).
     return out
 
 
@@ -887,12 +908,13 @@ async def scrape_southampton(pw, diag: bool = False) -> list[dict]:
 
 async def _fetch_playwright_towns(diag: bool = False) -> list[dict]:
     async with async_playwright() as pw:
-        babylon, southampton, islip = await asyncio.gather(
+        babylon, southampton, islip, tarrytown = await asyncio.gather(
             scrape_babylon(pw),
             scrape_southampton(pw, diag=diag),
             scrape_islip(pw, diag=diag),
+            scrape_tarrytown_village(pw, diag=diag),
         )
-    return babylon + southampton + islip
+    return babylon + southampton + islip + tarrytown
 
 
 def get_all_suffolk_town_results() -> list[dict]:
@@ -912,8 +934,9 @@ def get_all_suffolk_town_results() -> list[dict]:
     playwright_results = asyncio.run(_fetch_playwright_towns(diag=diag))
     all_results = static_results + playwright_results
     print(f"[Suffolk Towns] static (Brookhaven/Huntington/Smithtown/4x CivicEngage"
-          f"+Hempstead/NorthHempstead/OysterBay): {len(static_results)} | "
-          f"Playwright (Babylon/Southampton): {len(playwright_results)}")
+          f"+Hempstead/NorthHempstead/OysterBay/Westchester-BidNet): "
+          f"{len(static_results)} | Playwright (Babylon/Southampton/Islip/"
+          f"Tarrytown-village): {len(playwright_results)}")
     return all_results
 
 

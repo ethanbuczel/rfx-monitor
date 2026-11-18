@@ -34,12 +34,13 @@ def keyword_match(text: str) -> bool:
 
 
 # ─── Bonfire tuning ───────────────────────────────────────────────────────────
-# The Bonfire LIST view omits Department and Close Date, so (when enabled) each
-# matched opportunity's detail page is loaded to pull Department, Close Date and
-# Status. Costs ~1 page load per matched item (~1-2 min for PANYNJ). Set False
-# to skip it entirely — the digest still gets every opportunity, just with
-# "Due: Unknown" and no department shown.
-BONFIRE_ENRICH = True
+# Detail-page enrichment (Department / Close Date / Status). DISABLED: PANYNJ's
+# opportunity DETAIL pages sit behind Cloudflare bot verification, so loading
+# them per-item just returned the "Performing security verification" page — no
+# data, and ~39 wasted loads. Close dates come from the LIST rows instead (the
+# build loop already parses them), so this buys nothing for PANYNJ. Leave False
+# unless a Bonfire instance without Cloudflare (e.g. a county portal) needs it.
+BONFIRE_ENRICH = False
 # Optional department allow-list. None = show every department (recommended:
 # hard-filtering risks dropping relevant work filed under another department).
 # To restrict later, set e.g. {"Professional Technical & Advisory Services"}.
@@ -365,6 +366,13 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
                 print(f"    {oid} | due={r.get('due')} "
                       f"| dept={r.get('department', '')[:32]!r} "
                       f"| {r['title'][:70]!r}")
+            # Dump raw LIST cells for a few matched rows — the list is the only
+            # place not behind Cloudflare, so if a Department column exists it's
+            # here and we can read it without hitting a detail page.
+            for r in results[:4]:
+                cells = harvested.get(r["url"], ("", []))[1]
+                print(f"    [CELLS] {r['url'].rstrip('/').split('/')[-1]}: "
+                      f"{[c[:40] for c in cells]}")
     except PWTimeout:
         print(f"[{diag_tag}] Timed out waiting for content")
     except Exception as e:

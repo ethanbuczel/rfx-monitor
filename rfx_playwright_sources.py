@@ -233,6 +233,17 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
             else:
                 stable, last = 0, len(harvested)
 
+        # The list row carries everything we need, in order:
+        #   [Status, Ref#, Title, Department, Close Date, Days Left, "View…"]
+        # so Department, Close Date and Status all come straight from the cells —
+        # no detail page (which is Cloudflare-walled anyway).
+        import datetime as _dt
+        today = _dt.date.today()
+        _DATE_RE = re.compile(
+            r"(\d{1,2}/\d{1,2}/\d{2,4}"
+            r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})")
+        _STATUSES = ("open", "closed", "awarded", "cancelled", "canceled",
+                     "archived", "expired", "under review")
         for href, (full, texts) in harvested.items():
             if not _match(full):
                 continue
@@ -242,24 +253,54 @@ async def _scrape_bonfire_portal(pw, portal_url: str, base_url: str,
             raw_title = re.sub(r"\bview opportunity\b", "", raw_title,
                                flags=re.I).strip()
             title = _shorten_bonfire_title(raw_title)
-            # Drop commodity/goods bids up front (also saves a detail fetch).
-            if BONFIRE_DROP_COMMODITY and _bonfire_is_commodity(raw_title):
+
+            # Close date = first cell holding a date; Department = the cell just
+            # before it; Status = a cell that is a lone status word.
+            date, due_date, due_idx = "", None, None
+            for i, t in enumerate(texts):
+                dm = _DATE_RE.search(t)
+                if dm:
+                    date = re.sub(r"(\d{1,2})(?:st|nd|rd|th)", r"\1", dm.group(1))
+                    due_idx = i
+                    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%b %d %Y", "%B %d %Y"):
+                        try:
+                            due_date = _dt.datetime.strptime(
+                                re.sub(r",", "", date), fmt).date()
+                            break
+                        except ValueError:
+                            continue
+                    break
+            dept = ""
+            if due_idx and due_idx >= 1:
+                c = texts[due_idx - 1].strip()
+                if (c and not _DATE_RE.search(c)
+                        and c.lower() not in _STATUSES
+                        and c.lower() != "view opportunity"):
+                    dept = c[:70]
+            status = next((t.strip().lower() for t in texts
+                           if t.strip().lower() in _STATUSES), "")
+
+            # Filters: commodity (title or department), closed status, past due,
+            # optional department allow-list.
+            if BONFIRE_DROP_COMMODITY and _bonfire_is_commodity(raw_title, dept):
                 continue
-            # List view rarely carries a parseable date; detail enrichment below
-            # fills it in. Still try here in case a date is present (ordinals ok).
-            date = ""
-            dm = re.search(
-                r"(\d{1,2}/\d{1,2}/\d{2,4}"
-                r"|[A-Z][a-z]{2,8}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})", full)
-            if dm:
-                date = re.sub(r"(\d{1,2})(?:st|nd|rd|th)", r"\1", dm.group(1))
+            if status in ("closed", "awarded", "cancelled", "canceled",
+                          "archived", "expired"):
+                continue
+            if due_date is not None and due_date < today:
+                continue
+            if (BONFIRE_DEPARTMENTS is not None and dept
+                    and dept not in BONFIRE_DEPARTMENTS):
+                continue
+
             if title and len(title) > 4:
                 results.append({
                     "title": title[:200],
                     "agency": source,
-                    "date": date,
+                    "date": "",
                     "due": date or "Unknown",
-                    "extra": "",
+                    "extra": dept,
+                    "department": dept,
                     "url": href or portal_url,
                 })
 

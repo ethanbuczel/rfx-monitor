@@ -41,6 +41,11 @@ jobs:
         # Self-hosted Windows runners default to legacy Windows PowerShell,
         # which doesn't support bash-style "||". Rewritten with PowerShell's
         # own $LASTEXITCODE check instead.
+        #
+        # The push now rebases onto remote first and retries, so a code push
+        # that lands DURING the run (remote moves ahead -> "! [rejected] ...
+        # fetch first") no longer fails the job or loses the seen-file update.
+        # Code pushes don't touch rfx_seen.json, so the rebase is always clean.
         run: |
           git config user.name "rfx-bot"
           git config user.email "actions@github.com"
@@ -48,5 +53,15 @@ jobs:
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
             git commit -m "Update rfx_seen.json [skip ci]"
+            $pushed = $false
+            for ($i = 0; $i -lt 3; $i++) {
+              git pull --rebase --autostash origin main
+              git push
+              if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
+              Write-Host "push rejected (attempt $($i + 1)) - rebasing and retrying..."
+              Start-Sleep -Seconds 3
+            }
+            if (-not $pushed) {
+              Write-Host "seen-file push still failing after 3 attempts; digest already sent."
+            }
           }
-          git push

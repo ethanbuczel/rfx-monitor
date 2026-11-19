@@ -88,6 +88,24 @@ WESTCHESTER_BIDNET = [
     #    milling/resurfacing, engineering consultant services).
 ]
 
+# Extra keywords that count ONLY for the small Westchester/village sources. At
+# the village level these phrases are reliably roadway/drainage/sidewalk civil
+# work (e.g. "Franklin Courts Infrastructure Improvements"), but they are too
+# broad for the big agencies (PANYNJ "Marine Infrastructure", etc.), so they are
+# scoped here and NOT added to the shared rfx_common keyword list.
+WESTCHESTER_EXTRA_KEYWORDS = (
+    "infrastructure improvement", "street reconstruction",
+    "road reconstruction", "street improvement", "roadway improvement",
+)
+
+
+def _westchester_matches(*parts: str) -> bool:
+    """Shared keyword filter, plus the village-scoped extras above."""
+    if matches(*parts):
+        return True
+    blob = " ".join(p for p in parts if p).lower()
+    return any(k in blob for k in WESTCHESTER_EXTRA_KEYWORDS)
+
 
 def scrape_bidnet_agency(name: str, slug: str, source: str) -> list[dict]:
     """Generic BidNet / Empire State Purchasing Group scraper for one agency.
@@ -108,7 +126,7 @@ def scrape_bidnet_agency(name: str, slug: str, source: str) -> list[dict]:
                 href = "https://www.bidnetdirect.com" + href
             if not title or len(title) < 5:
                 continue
-            if matches(title):
+            if _westchester_matches(title):
                 row_text = row.get_text(" ", strip=True)
                 due = "Unknown"
                 dm = re.search(
@@ -175,7 +193,7 @@ def scrape_westchester_county_portal() -> list[dict]:
             if not keep_date:
                 continue
 
-            if matches(title) or matches(text):
+            if _westchester_matches(title) or _westchester_matches(text):
                 out.append(result(SOURCE_WESTCHESTER, "Westchester County",
                                   title, url, due=due))
     except Exception as e:
@@ -286,7 +304,7 @@ def _parse_tarrytown(html: str, diag: bool = False) -> list[dict]:
                 continue                      # too old to assume still open
         n_recent += 1
 
-        if not matches(title):
+        if not _westchester_matches(title):
             continue
         key = title.lower()
         if key in seen:

@@ -416,7 +416,13 @@ def classify_results(results: list[dict]) -> list[dict]:
         # different tags), upgrade to "relevant" so the verdict is stable. Only
         # touches "unknown" — a confident "not_relevant" read from a real detail
         # page is left alone.
-        if verdict == "unknown" and _strong_relevant(item.get("title", "")):
+        # TRAFFIC-DOMAIN ONLY: _strong_relevant checks TRAFFIC phrases, so it is
+        # gated to traffic runs. The CM pipeline reuses this same classify_results
+        # with its own prompt (set_prompt_builder(_cm_prompt)), and must NOT get
+        # traffic-phrase upgrades — so skip the rule unless the traffic prompt is
+        # the one active.
+        if (verdict == "unknown" and _PROMPT_BUILDER is _traffic_prompt
+                and _strong_relevant(item.get("title", ""))):
             verdict = "relevant"
             if not reason:
                 reason = "clear traffic/engineering scope in title"

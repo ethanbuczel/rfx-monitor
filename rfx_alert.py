@@ -607,8 +607,16 @@ def build_html(results: list[dict]) -> str:
         else:
             return ""  # classifier didn't run at all
         reason = it.get("relevance_reason") or ""
-        if it.get("relevance_title_only"):
+        # Show what the AI based its guess on: the full solicitation/ad text when
+        # it could fetch it, or just the title when it couldn't. relevance_title_
+        # only is True (title only), False (read the ad), or absent (classifier
+        # didn't run) — so distinguish False from absent explicitly.
+        tonly = it.get("relevance_title_only")
+        if tonly:
             reason = (reason + " (title only)").strip() if reason else "title only"
+        elif tonly is False:
+            reason = ((reason + " (read the solicitation)").strip()
+                      if reason else "read the solicitation")
         reason_html = f" <span style='color:#868e96'>— {reason}</span>" if reason else ""
         dot = (f"<span style='display:inline-block;width:9px;height:9px;"
                f"border-radius:50%;background:{color};margin-right:5px;"

@@ -36,11 +36,40 @@ PHRASE_KEYWORDS = [
     # -- Project-delivery terms (titles often use these instead of a discipline) --
     "design-build", "design build", "design-bid-build",
     "progressive design-build", "task order", "idiq",
+    # -- Safety programs & planning — the Safe Streets for All (SS4A) / Vision
+    #    Zero wave generates a LOT of these; titles say "Safe Streets" /
+    #    "Safety Action Plan", which "complete streets"/"safety study" miss. --
+    "safe streets", "safety action plan", "ss4a", "vision zero",
+    "road safety audit", "road safety", "roadway safety", "traffic safety",
+    "systemic safety", "safety improvement", "safety improvements", "arterial",
+    # -- Roadway / civil scopes a title may lead with instead of a discipline --
+    "roundabout", "traffic study", "traffic impact", "traffic operations",
+    "speed management", "speed study", "speed hump", "speed table",
+    "resurfacing", "milling and resurfacing", "road reconstruction",
+    "roadway reconstruction", "roadway lighting", "street lighting",
+    "highway lighting", "construction engineering",
+    "culvert", "retaining wall", "drainage", "storm drainage", "stormwater",
+    "green infrastructure", "greenstreet", "wayfinding", "guide sign",
+    "right-of-way", "right of way",
+    "topographic survey", "land surveying", "route survey",
+    "parking study", "parking management",
+    # -- Transit / rail (specific phrasings — bare "rail"/"transit" are too broad:
+    #    they'd hit "guardrail", "transition") --
+    "public transit", "mass transit", "bus rapid transit", "transit station",
+    "railroad", "light rail", "commuter rail", "passenger rail", "grade crossing",
+    # -- Aviation infrastructure (airport landside/airfield civil; bare "airport"
+    #    omitted — too noisy with terminal HVAC/janitorial) --
+    "aviation", "runway", "taxiway", "airfield", "landside",
+    # -- Federal programs that show up verbatim in titles --
+    "reconnecting communities", "transportation alternatives",
 ]
 
 # Short ALL-CAPS acronyms — matched on word boundaries so we don't hit, e.g.,
 # "its" inside "limits" or "mot" inside "motor".
-ACRONYM_KEYWORDS = ["ITS", "MOT", "MPT", "WZTC", "CEI", "VMS", "PVMS", "TMC", "RWIS", "ADA", "APS"]
+ACRONYM_KEYWORDS = ["ITS", "MOT", "MPT", "WZTC", "CEI", "VMS", "PVMS", "TMC",
+                    "RWIS", "ADA", "APS",
+                    # safety/funding programs & devices, all distinctive uppercase
+                    "HSIP", "CMAQ", "TSMO", "BRT", "RRFB"]
 _ACRONYM_RE = re.compile(r"\b(" + "|".join(ACRONYM_KEYWORDS) + r")\b")
 
 # Whole-word keywords — case-insensitive but boundary-checked, so "bridge"
@@ -73,6 +102,16 @@ NEGATIVE_PHRASES = [
     "leachate",                 # landfill systems — never traffic
     "e-bike battery",           # battery cabinets RFI, not roadway design
     "refrigeration systems",    # building HVAC/refrigeration maintenance
+    # --- Guards for the broader scope terms added below (resurfacing/drainage/
+    # safety), so they can't clip the obvious non-roadway look-alikes. ---
+    "pool resurfacing", "court resurfacing", "tennis court",   # recreational
+    "roof drainage", "foundation drainage",                    # building
+    "life safety",              # building fire/life-safety, not roadway safety
+    "food safety", "fire safety",
+    "arterial catheter", "arterial line", "arterial blood",    # MEDICAL arterial,
+    "intra-arterial", "peripheral arterial",                   # not roadway
+    "occupational safety", "workplace safety",  # HR/facility safety, not roadway
+    "aviation fuel", "aviation insurance",      # not airfield infrastructure
 ]
 
 

@@ -57,9 +57,11 @@ PHRASE_KEYWORDS = [
     #    they'd hit "guardrail", "transition") --
     "public transit", "mass transit", "bus rapid transit", "transit station",
     "railroad", "light rail", "commuter rail", "passenger rail", "grade crossing",
-    # -- Aviation infrastructure (airport landside/airfield civil; bare "airport"
-    #    omitted — too noisy with terminal HVAC/janitorial) --
-    "aviation", "runway", "taxiway", "airfield", "landside",
+    # -- Aviation infrastructure (airport landside/airfield civil). Bare "airport"
+    #    AND bare "aviation" are omitted — "aviation" matched the PANYNJ
+    #    "Aviation Delegated Procurement" DEPARTMENT name and pulled in warehouse
+    #    leases/concessions. These infra-specific terms don't have that problem. --
+    "runway", "taxiway", "airfield", "landside",
     # -- Federal programs that show up verbatim in titles --
     "reconnecting communities", "transportation alternatives",
 ]

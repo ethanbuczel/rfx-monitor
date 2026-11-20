@@ -462,10 +462,16 @@ async def scrape_passport(pw) -> list[dict]:
         _match = keyword_match
 
     async def _harvest_current_page():
-        """Parse all keyword-matching solicitations on the loaded page.
-        PASSPort renders each solicitation as a link to
-        /bpm/process_manage_extranet/NNN inside a container div (NOT a table),
-        so target those links and read their surrounding container text."""
+        """Parse keyword-matching solicitations on the loaded browse page.
+        Each is an "Edit <title>" link to /bpm/process_manage_extranet/NNN, and
+        the STATUS and DUE DATE sit in sibling columns of the SAME row. The old
+        code walked up only to the first >60-char container — which caught just
+        the title — so closed/past-due ads leaked through and the due date had
+        to be scraped (unreliably) from each detail page. Now we climb to the
+        full-row container (until its text holds a date + a status word) and read
+        status + due straight from the row."""
+        import os as _osd
+        import datetime as _dtmod
         found = 0
         links = await page.query_selector_all(
             "a[href*='process_manage_extranet'], a[href*='/bpm/']")
@@ -473,53 +479,84 @@ async def scrape_passport(pw) -> list[dict]:
             href = await lk.get_attribute("href") or ""
             if "process_manage_extranet" not in href and "/bpm/" not in href:
                 continue
-            # Full row text from the nearest container that holds the details.
+            # Full ROW text: climb parents keeping the largest row-sized text,
+            # until it has a date AND a stage word (= the whole row, not just
+            # the title cell). Length-capped so we never grab the entire list.
             try:
-                container = await lk.evaluate(
-                    "el => { let p = el; for (let i=0;i<5;i++){ if(!p.parentElement) break; p = p.parentElement; if (p.innerText && p.innerText.length > 60) return p.innerText; } return el.innerText; }")
+                full = await lk.evaluate(r"""
+                    el => {
+                      let best = (el.innerText || '').trim();
+                      let p = el;
+                      for (let i = 0; i < 9; i++) {
+                        if (!p.parentElement) break;
+                        p = p.parentElement;
+                        const t = (p.innerText || '').replace(/\s+/g, ' ').trim();
+                        if (t.length > best.length && t.length < 900) best = t;
+                        if (/\d{1,2}\/\d{1,2}\/\d{2,4}/.test(best) &&
+                            /received|closed|passed|released|open|evaluation|award|solicit|propos|pending/i.test(best) &&
+                            best.length > 120) break;
+                      }
+                      return best;
+                    }
+                """)
             except Exception:
-                container = (await lk.inner_text())
-            full = re.sub(r"\s+", " ", container or "").strip()
+                full = (await lk.inner_text())
+            full = re.sub(r"\s+", " ", full or "").strip()
             if not _match(full):
                 continue
-
-            # STATUS FILTER: PASSPort rows carry a status word. Only keep ones
-            # that are actually open for bidding. Drop dead stages — the date
-            # shown for those is a status-change timestamp (often long past),
-            # which is why closed jobs were leaking in with stale dates.
             low = full.lower()
-            DEAD = ("closed", "selections made", "responses received",
-                    "response received", "cancelled", "canceled", "awarded",
-                    "not awarded", "selection made", "expired")
-            if any(d in low for d in DEAD):
+
+            # PAST-DUE / DEAD rows → drop. PASSPort prints "Bid due date has
+            # passed" on expired rows and a dead status ("Responses Received",
+            # "Closed", etc.) on others — these were the "old ads" leaking in.
+            if ("due date has passed" in low
+                    or any(d in low for d in (
+                        "responses received", "response received", "closed",
+                        "cancelled", "canceled", "awarded", "not awarded",
+                        "selections made", "selection made", "under evaluation",
+                        "expired", "withdrawn"))):
                 continue
-            # Prefer explicitly-open statuses; if no recognizable status at all,
-            # keep it (some rows omit status) so we don't over-filter.
-            OPEN = ("released", "open", "accepting", "active", "rfi", "rfp",
-                    "rfq", "invitation", "solicit")
-            has_status = any(s in low for s in OPEN) or not any(
-                w in low for w in ("released", "closed", "responses",
-                                    "selections", "cancel", "award", "expired"))
-            if not has_status:
+
+            # PUBLIC link: the harvested href is the vendor "Edit"/manage link,
+            # which is login-walled (that's why it didn't open). Rebuild the
+            # public view URL from the same solicitation id.
+            url = href
+            mid = re.search(r"process_manage_extranet/(\d+)", href)
+            if mid:
+                url = ("https://passport.cityofnewyork.us/page.aspx/en/rfp/"
+                       "request_view_public/" + mid.group(1))
+            elif not url.startswith("http"):
+                url = "https://passport.cityofnewyork.us" + url
+            if url in _seen_keys:
                 continue
-            if not href.startswith("http"):
-                href = "https://passport.cityofnewyork.us" + href
-            if href in _seen_keys:
-                continue
-            _seen_keys.add(href)
-            # Title: strip the leading "Edit " and use up to the first agency-ish
-            # ALLCAPS run or a reasonable length.
+            _seen_keys.add(url)
+
             link_txt = re.sub(r"^\s*Edit\s+", "", (await lk.inner_text()).strip())
             title = link_txt.split("\n")[0][:160] or full[:120]
-            # Browse-page date is unreliable (often a status timestamp, and the
-            # real Due Date lives only on the detail page). Store the candidate;
-            # the real due date is resolved in a second pass below.
+
+            # Due date = the LATEST m/d/y in the row (release date < due date);
+            # an open row always has a future due date here.
+            due = "Unknown"
+            parsed = []
+            for ds in re.findall(r"\d{1,2}/\d{1,2}/\d{2,4}", full):
+                for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+                    try:
+                        parsed.append(_dtmod.datetime.strptime(ds, fmt).date())
+                        break
+                    except ValueError:
+                        continue
+            if parsed:
+                due = max(parsed).strftime("%m/%d/%Y")
+
+            if _osd.environ.get("DIAG") and found < 6:
+                print(f"[PASSPort ROW] due={due} | {full[:170]!r}")
+
             results.append({
                 "title": title,
                 "agency": "NYC PASSPort",
                 "date": "",
-                "due": "Unknown",
-                "url": href,
+                "due": due,
+                "url": url,
             })
             found += 1
         return found
@@ -596,86 +633,27 @@ async def scrape_passport(pw) -> list[dict]:
             except Exception:
                 break
 
-        # ── Second pass: resolve each item's REAL Due Date from its detail
-        # page and drop anything past due. The browse page doesn't expose the
-        # due date (it's under "Key Dates > Due Date" on the detail page), which
-        # is why expired items were slipping through as "Unknown". Slower (one
-        # load per item) but accurate.
+        # ── Past-due safety net. The harvest already drops rows flagged
+        # "Bid due date has passed" / dead-status, and reads the due date
+        # straight from the browse row — so there's NO per-item detail-page
+        # fetch any more (those were login-walled and JS-flaky, which is why
+        # the due date kept coming back Unknown). Here we just belt-and-suspenders
+        # drop anything whose parsed due date is already in the past.
         import datetime as _dt
-        _diag_detail = _os.environ.get("DIAG")
         today = _dt.date.today()
         kept = []
         for item in results:
-            due_date = None
-            try:
-                await page.goto(item["url"], timeout=25000,
-                                wait_until="domcontentloaded")
-                # Key Dates render via JS after load — wait for network to
-                # settle and for the "Due Date" label to actually appear.
+            d = item.get("due", "Unknown")
+            mm = re.match(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", d or "")
+            if mm:
+                a, b, c = (int(x) for x in mm.groups())
+                c += 2000 if c < 100 else 0
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=12000)
-                except Exception:
+                    if _dt.date(c, a, b) < today:
+                        continue
+                except ValueError:
                     pass
-                try:
-                    await page.wait_for_selector("text=/Due Date/i", timeout=8000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(800)
-
-                # The dates live in INPUT field values (the body text only shows
-                # the "(M/d/yyyy)" placeholder labels). Find the input whose
-                # label/preceding text is "Due Date" and read its .value.
-                due_str = await page.evaluate(r"""
-                    () => {
-                      const dateRe = /^\d{1,2}\/\d{1,2}\/\d{2,4}$/;
-                      const inputs = Array.from(document.querySelectorAll('input'));
-                      // 1) Prefer an input whose id/name/aria-label points to the
-                      //    (non-questions, non-contract) Due Date.
-                      for (const inp of inputs) {
-                        const val = (inp.value || '').trim();
-                        if (!dateRe.test(val)) continue;
-                        const meta = ((inp.id||'') + ' ' + (inp.name||'') + ' ' +
-                                      (inp.getAttribute('aria-label')||'')).toLowerCase();
-                        if (meta.includes('due') && !meta.includes('question')
-                            && !meta.includes('contract') && !meta.includes('start')
-                            && !meta.includes('end')) {
-                          return val;
-                        }
-                      }
-                      // 2) Fallback: label text sitting before the input.
-                      for (const inp of inputs) {
-                        const val = (inp.value || '').trim();
-                        if (!dateRe.test(val)) continue;
-                        let label = '', el = inp;
-                        for (let i = 0; i < 6 && el; i++) {
-                          el = el.previousElementSibling || el.parentElement;
-                          if (el && el.innerText) { label = el.innerText.trim().slice(0,60); if (label) break; }
-                        }
-                        const L = label.toLowerCase();
-                        if (L.includes('due date') && !L.includes('questions')
-                            && !L.includes('contract')) return val;
-                      }
-                      return '';
-                    }
-                """)
-                m = re.match(r"(\d{1,2}/\d{1,2}/\d{2,4})", due_str or "")
-                if _diag_detail:
-                    print(f"[PASSPort DETAIL] {item['title'][:40]!r} "
-                          f"due_input={due_str!r}")
-                if m:
-                    item["due"] = m.group(1)
-                    item["date"] = m.group(1)
-                    try:
-                        mm, dd, yy = (int(x) for x in m.group(1).split("/"))
-                        yy += 2000 if yy < 100 else 0
-                        due_date = _dt.date(yy, mm, dd)
-                    except ValueError:
-                        due_date = None
-            except Exception as e:
-                if _diag_detail:
-                    print(f"[PASSPort DETAIL] {item['title'][:40]!r} ERROR {e}")
-            if due_date is not None and due_date < today:
-                continue
+                item["date"] = item["due"]
             kept.append(item)
         results[:] = kept
 

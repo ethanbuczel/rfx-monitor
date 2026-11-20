@@ -293,10 +293,21 @@ def _traffic_prompt(context: str) -> str:
         "sub-work is being advertised. If it's a normal agency solicitation or "
         "a prime seeking design/engineering subconsultants, set \"sub\": false."
         "\n\n"
+        "ALSO flag GEOGRAPHY (annotation only — this NEVER changes relevance). "
+        "The firm's offices and work are the NYC metro area, Long Island, the "
+        "Hudson Valley, the Capital District (Albany), New Jersey, and "
+        "Connecticut. If the opportunity's location is CLEARLY far outside that "
+        "footprint — Western NY (Buffalo, Rochester, Niagara Falls, "
+        "Orleans/Erie/Monroe/Niagara counties), Central NY (Syracuse/Onondaga), "
+        "the Southern Tier, or the North Country — set \"far\": true. If the "
+        "location is in-region, is only a statewide/multi-region contract, is "
+        "not stated, or you are at all unsure, set \"far\": false. A 'far' item "
+        "still stays in the digest; the flag only tells the reader the site is a "
+        "long way from the offices.\n\n"
         f"{context}\n"
         "Respond with ONLY a compact JSON object, no other text:\n"
         '{"v": "relevant"|"not_relevant"|"unknown", "sub": true|false, '
-        '"r": "<reason, max 10 words>"}'
+        '"far": true|false, "r": "<reason, max 10 words>"}'
     )
 
 
@@ -312,11 +323,12 @@ def set_prompt_builder(fn) -> None:
     _PROMPT_BUILDER = fn
 
 
-def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
-    """Return (verdict, reason, had_detail, is_sub) for one item. verdict in
-    {"relevant", "not_relevant", "unknown"}; is_sub flags a prime advertising
-    for a field-work subcontractor. Never raises — returns
-    ("unknown", "", had_detail, False) on any problem, so the caller fails
+def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool, bool]:
+    """Return (verdict, reason, had_detail, is_sub, is_far) for one item. verdict
+    in {"relevant", "not_relevant", "unknown"}; is_sub flags a prime advertising
+    for a field-work subcontractor; is_far flags a location clearly outside the
+    firm's region (annotation only). Never raises — returns
+    ("unknown", "", had_detail, False, False) on any problem, so the caller fails
     open."""
     title = item.get("title", "")
     detail = _fetch_detail_text(item.get("url", ""))
@@ -359,7 +371,7 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
                 _LLM_ERR_LOGGED = True
                 print(f"[classify] OpenRouter HTTP {resp.status_code}: "
                       f"{resp.text[:200]}")
-            return "unknown", "", had_detail, False
+            return "unknown", "", had_detail, False, False
         content = resp.json()["choices"][0]["message"]["content"]
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
         import json
@@ -368,13 +380,14 @@ def _classify_one(item: dict, api_key: str) -> tuple[str, str, bool, bool]:
         if verdict not in ("relevant", "not_relevant", "unknown"):
             verdict = "unknown"
         is_sub = bool(v.get("sub", False))
-        return verdict, str(v.get("r", ""))[:80], had_detail, is_sub
+        is_far = bool(v.get("far", False))
+        return verdict, str(v.get("r", ""))[:80], had_detail, is_sub, is_far
     except Exception as e:
         global _LLM_ERR_LOGGED2
         if not _LLM_ERR_LOGGED2:
             _LLM_ERR_LOGGED2 = True
             print(f"[classify] OpenRouter call failed: {type(e).__name__}: {e}")
-        return "unknown", "", had_detail, False
+        return "unknown", "", had_detail, False, False
 
 
 def classify_results(results: list[dict]) -> list[dict]:
@@ -400,13 +413,13 @@ def classify_results(results: list[dict]) -> list[dict]:
                 try:
                     verdicts[idx] = fut.result()
                 except Exception:
-                    verdicts[idx] = ("unknown", "", False, False)
+                    verdicts[idx] = ("unknown", "", False, False, False)
     except Exception as e:
         print(f"[classify] batch failed ({e}) — leaving items unannotated.")
         return results
 
-    n_notrel = n_rel = n_rescued = n_sub = n_strong = 0
-    for idx, (verdict, reason, had_detail, is_sub) in verdicts.items():
+    n_notrel = n_rel = n_rescued = n_sub = n_strong = n_far = 0
+    for idx, (verdict, reason, had_detail, is_sub, is_far) in verdicts.items():
         item = results[idx]
         # SAFEGUARD: never filter out an item the AI could only see the TITLE of.
         # Without reading the actual solicitation, a "not_relevant" call is a
@@ -435,34 +448,40 @@ def classify_results(results: list[dict]) -> list[dict]:
                 reason = "clear traffic/engineering scope in title"
             n_strong += 1
 
-        # Sub/field-work note: a prime advertising for a field-work sub (coring,
-        # boring, etc.) STAYS in the main view (you asked to keep these), but we
-        # annotate the reason so it's obvious the design is already awarded.
+        # Annotations that STAY in the main view but add context to the reason
+        # line: a field-work sub ad, and a location clearly outside the firm's
+        # region. Neither changes the relevance verdict — they only inform.
         item["is_sub_fieldwork"] = is_sub
-        sub_note = "sub/field work — design already awarded" if is_sub else ""
+        item["is_far_region"] = is_far
+        notes = []
         if is_sub:
+            notes.append("sub/field work — design already awarded")
             n_sub += 1
+        if is_far:
+            notes.append("⚠ far from region")
+            n_far += 1
 
-        def _with_sub(base: str) -> str:
-            if not is_sub:
+        def _with_notes(base: str) -> str:
+            if not notes:
                 return base
-            return f"{base} — {sub_note}" if base else sub_note
+            joined = " — ".join(notes)
+            return f"{base} — {joined}" if base else joined
 
         if verdict == "not_relevant":
             item["relevance"] = "not_relevant"
-            item["relevance_reason"] = _with_sub(reason or "")
+            item["relevance_reason"] = _with_notes(reason or "")
             n_notrel += 1
         elif verdict == "relevant":
             item["relevance"] = "relevant"
-            # Relevant items normally have no reason line; but if it's a
-            # field-sub ad, surface that note so you can see it at a glance.
-            item["relevance_reason"] = sub_note if is_sub else ""
+            # Relevant items normally have no reason line; surface the sub/far
+            # notes so they're visible at a glance.
+            item["relevance_reason"] = _with_notes("")
             n_rel += 1
         else:
             item["relevance"] = "unknown"
             # Keep the reason for unknowns so you can see the AI's read, but it
             # stays in the main view either way.
-            item["relevance_reason"] = _with_sub(reason or "")
+            item["relevance_reason"] = _with_notes(reason or "")
             item["relevance_title_only"] = not had_detail
             continue
         item["relevance_title_only"] = not had_detail
@@ -477,5 +496,6 @@ def classify_results(results: list[dict]) -> list[dict]:
           + (f" ({n_rescued} title-only kept in main view)" if n_rescued else "")
           + (f" ({n_strong} upgraded by strong-title rule)" if n_strong else "")
           + (f" [{n_sub} flagged sub/field-work]" if n_sub else "")
+          + (f" [{n_far} flagged far-from-region]" if n_far else "")
           + ".")
     return results

@@ -483,24 +483,29 @@ async def scrape_passport(pw) -> list[dict]:
             # until it has a date AND a stage word (= the whole row, not just
             # the title cell). Length-capped so we never grab the entire list.
             try:
-                full = await lk.evaluate(r"""
+                row = await lk.evaluate(r"""
                     el => {
                       let best = (el.innerText || '').trim();
-                      let p = el;
+                      let bestEl = el, p = el;
                       for (let i = 0; i < 9; i++) {
                         if (!p.parentElement) break;
                         p = p.parentElement;
                         const t = (p.innerText || '').replace(/\s+/g, ' ').trim();
-                        if (t.length > best.length && t.length < 900) best = t;
+                        if (t.length > best.length && t.length < 900) { best = t; bestEl = p; }
                         if (/\d{1,2}\/\d{1,2}\/\d{2,4}/.test(best) &&
                             /received|closed|passed|released|open|evaluation|award|solicit|propos|pending/i.test(best) &&
                             best.length > 120) break;
                       }
-                      return best;
+                      const hrefs = Array.from(bestEl.querySelectorAll('a[href]'))
+                                         .map(a => a.getAttribute('href'));
+                      return { text: best, hrefs: hrefs };
                     }
                 """)
+                full = row.get("text") or ""
+                row_hrefs = row.get("hrefs") or []
             except Exception:
                 full = (await lk.inner_text())
+                row_hrefs = [href]
             full = re.sub(r"\s+", " ", full or "").strip()
             if not _match(full):
                 continue
@@ -517,19 +522,41 @@ async def scrape_passport(pw) -> list[dict]:
                         "expired", "withdrawn"))):
                 continue
 
-            # PUBLIC link: the harvested href is the vendor "Edit"/manage link,
-            # which is login-walled (that's why it didn't open). Rebuild the
-            # public view URL from the same solicitation id.
-            url = href
+            # PUBLIC link. The title anchor we key off is the vendor "Edit"/
+            # manage link (…/bpm/process_manage_extranet/NNN), which is login-
+            # walled — that's why it didn't open, and why rebuilding a
+            # /rfp/request_view_public/NNN guess from the same id didn't work
+            # either (the public view uses a different id / needs the browse
+            # session). So PREFER a genuinely public anchor if the row has one;
+            # otherwise fall back to the public Browse page (always opens), never
+            # the dead edit link. DIAG dumps every row href so we can lock the
+            # real public deep-link format from one live run.
+            PUBLIC_BROWSE = ("https://passport.cityofnewyork.us/page.aspx/en/"
+                             "rfp/request_browse_public")
+            url = None
+            for h in row_hrefs:
+                if not h:
+                    continue
+                hl = h.lower()
+                if ("process_manage_extranet" in hl or "/bpm/" in hl):
+                    continue  # the login-walled edit link — skip
+                if ("public" in hl or "request_view" in hl
+                        or "cityrecord" in hl or "/rfp/" in hl):
+                    url = h if h.startswith("http") else \
+                        "https://passport.cityofnewyork.us" + h
+                    break
+            if not url:
+                url = PUBLIC_BROWSE
+            if _osd.environ.get("DIAG") and found < 8:
+                print(f"[PASSPort HREFS] edit={href[:55]!r} -> url={url[:70]!r} "
+                      f"| row_hrefs={[(h or '')[:55] for h in row_hrefs]}")
+            # Dedup on the edit-link id (stable & unique per solicitation) so
+            # browse-page fallbacks don't all collapse into one entry.
             mid = re.search(r"process_manage_extranet/(\d+)", href)
-            if mid:
-                url = ("https://passport.cityofnewyork.us/page.aspx/en/rfp/"
-                       "request_view_public/" + mid.group(1))
-            elif not url.startswith("http"):
-                url = "https://passport.cityofnewyork.us" + url
-            if url in _seen_keys:
+            seen_key = mid.group(1) if mid else url
+            if seen_key in _seen_keys:
                 continue
-            _seen_keys.add(url)
+            _seen_keys.add(seen_key)
 
             link_txt = re.sub(r"^\s*Edit\s+", "", (await lk.inner_text()).strip())
             title = link_txt.split("\n")[0][:160] or full[:120]

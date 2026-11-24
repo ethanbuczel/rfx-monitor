@@ -25,24 +25,24 @@ DESIGN (per Ethan, 2026-11-24)
   • "consultant" is scoped HERE (not in the global keyword list) — a consultant
     job on Parks is worth surfacing; a consultant job on every other source is not.
 
-NOTE: this environment can't reach parks.ny.gov, so the row parser is written
-defensively against the page's messy table and prints a DIAG dump of every row it
-sees. Run once with DIAG=1 and check the log to confirm titles/dues/links land
-right; calibrate selectors from that if needed.
+FETCH: parks.ny.gov sits behind bot-protection that 403s plain `requests` (same
+as Tarrytown), so we load the page in headless Chromium (Playwright) and parse the
+RENDERED html. Row parser is defensive against the page's messy table and prints a
+DIAG dump of every row — run once with DIAG=1 and check the log to confirm
+titles/dues/links land right.
 
 get_parks_results() -> list[dict]   # standard result dicts, for rfx_alert
 """
 
 import os
 import re
+import asyncio
 import datetime as dt
 
 PARKS_URL = "https://www.parks.ny.gov/business/procurement-opportunities.aspx"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-}
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 # Commodity / operations junk — Parks lists a lot of it. These are deliberately
 # specific so they can't clip real design/consultant/infrastructure work. A row
@@ -111,12 +111,34 @@ def _abs(href: str) -> str:
     return "https://www.parks.ny.gov" + (href if href.startswith("/") else "/" + href)
 
 
-def get_parks_results() -> list[dict]:
-    try:
-        import requests
-    except ImportError:
-        print("[Parks] requests not installed — skipping.")
-        return []
+async def _fetch_html() -> str:
+    """Load the Parks procurement page in headless Chromium and return the
+    RENDERED html. Plain requests gets a 403 here (bot-protection), so a real
+    browser is required — same approach as the Tarrytown village scraper."""
+    from playwright.async_api import async_playwright
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        ctx = await browser.new_context(user_agent=_UA)
+        page = await ctx.new_page()
+        try:
+            await page.goto(PARKS_URL, timeout=45000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=25000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(2500)  # let any challenge/table settle
+            # If a Cloudflare interstitial is up, the real table won't be present
+            # yet; give it one more beat.
+            html = await page.content()
+            if "procurement" not in html.lower() and "C00" not in html:
+                await page.wait_for_timeout(4000)
+                html = await page.content()
+            return html
+        finally:
+            await browser.close()
+
+
+def _parse_html(html: str, diag: bool) -> list[dict]:
     try:
         from bs4 import BeautifulSoup
     except ImportError:
@@ -130,20 +152,10 @@ def get_parks_results() -> list[dict]:
                     "url": url, "date": date or "", "due": due or "Unknown",
                     "extra": extra or ""}
 
-    diag = bool(os.environ.get("DIAG"))
-    try:
-        r = requests.get(PARKS_URL, headers=HEADERS, timeout=40)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"[Parks] error: {e}")
-        return []
-
-    soup = BeautifulSoup(r.text, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
     today = dt.date.today()
     out, seen = [], set()
 
-    # The open solicitations live in table rows. Walk every <tr>; a real data row
-    # has a procurement number somewhere in it. (Header/spacer rows won't.)
     rows = soup.find_all("tr")
     if diag:
         print(f"[Parks DIAG] <tr> rows found: {len(rows)}")
@@ -163,7 +175,6 @@ def get_parks_results() -> list[dict]:
         pnum = re.sub(r"\s+", "", pm.group(1)).upper()
 
         low = row_text.lower()
-        # Skip closed / withdrawn / cancelled rows.
         if any(w in low for w in ("closed", "withdrawn", "cancelled",
                                   "canceled", "awarded", "rescinded")):
             if diag:
@@ -171,15 +182,16 @@ def get_parks_results() -> list[dict]:
             continue
 
         # Title = the longest alphabetic cell that isn't the procurement number
-        # or the updates/date text (best-effort; the DIAG dump shows the raw row
-        # so we can tighten this to a fixed column if the live table needs it).
+        # or a short date cell (best-effort; DIAG shows the raw row so we can pin
+        # it to a fixed column if the live table needs it).
         title = ""
         for c in cells:
             t = re.sub(r"\s+", " ", c.get_text(" ", strip=True)).strip()
-            if not t or _PNUM_RE.fullmatch(t) or _DATE_RE.search(t) and len(t) < 40:
+            if not t or _PNUM_RE.fullmatch(t):
                 continue
-            letters = sum(ch.isalpha() for ch in t)
-            if letters > sum(ch.isalpha() for ch in title):
+            if _DATE_RE.search(t) and len(t) < 40:
+                continue
+            if sum(ch.isalpha() for ch in t) > sum(ch.isalpha() for ch in title):
                 title = t
         title = re.sub(r"^(?:IFB|RFP|RFQ|RFI)\s+", "", title).strip()
         if not title:
@@ -191,14 +203,12 @@ def get_parks_results() -> list[dict]:
                 print(f"[Parks DIAG] drop junk  {pnum}: {title[:70]!r}")
             continue
 
-        # Due date: latest date in the row. Drop past-due.
         due_str, due_date = _latest_date(row_text)
         if due_date is not None and due_date < today:
             if diag:
                 print(f"[Parks DIAG] skip PASTDUE {pnum} ({due_str}): {title[:60]!r}")
             continue
 
-        # Link: first PDF document link in the row, else the procurement page.
         url = PARKS_URL
         for a in tr.find_all("a", href=True):
             if ".pdf" in a["href"].lower():
@@ -220,6 +230,18 @@ def get_parks_results() -> list[dict]:
 
     print(f"[Parks] {kept} open solicitations")
     return out
+
+
+def get_parks_results() -> list[dict]:
+    diag = bool(os.environ.get("DIAG"))
+    try:
+        html = asyncio.run(_fetch_html())
+    except Exception as e:
+        print(f"[Parks] fetch error: {e}")
+        return []
+    if diag:
+        print(f"[Parks DIAG] html length: {len(html)}")
+    return _parse_html(html, diag)
 
 
 if __name__ == "__main__":

@@ -115,25 +115,61 @@ _CHALLENGE = ("just a moment", "security verification", "verify you are human",
               "checking your browser", "enable javascript and cookies",
               "performing security verification")
 
+# Patches that make headless Chromium look like a normal browser — Cloudflare's
+# "managed challenge" fingerprints these to detect automation.
+_STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+window.chrome = { runtime: {} };
+"""
+_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+]
+
 
 async def _fetch_html(diag: bool = False) -> str:
-    """Load the Parks procurement page in headless Chromium and return the
-    RENDERED html. Plain requests gets a 403, AND the page sits behind a
-    Cloudflare "Just a moment..." JS interstitial, so we must POLL until that
-    challenge clears before reading content — the exact approach that works for
-    the Tarrytown village scraper."""
+    """Load the Parks procurement page and return the RENDERED html. parks.ny.gov
+    sits behind a strict Cloudflare managed challenge that 403s plain requests and
+    fingerprints vanilla headless Chromium, so we: (1) use real Chrome if present
+    (channel='chrome') — much less likely to be flagged than bundled Chromium,
+    (2) apply anti-automation stealth patches, (3) reload once mid-wait (a reload
+    with the challenge cookie set often clears it), and (4) poll until the
+    challenge text is gone. Set PARKS_HEADFUL=1 to run a visible browser, which
+    passes the challenge when headless still can't."""
     from playwright.async_api import async_playwright
+    headful = bool(os.environ.get("PARKS_HEADFUL"))
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        ctx = await browser.new_context(user_agent=_UA, locale="en-US")
+        # Prefer real Chrome; fall back to bundled Chromium if that channel isn't
+        # installed on the runner.
+        browser = None
+        for kw in ({"channel": "chrome"}, {}):
+            try:
+                browser = await pw.chromium.launch(
+                    headless=not headful, args=_LAUNCH_ARGS, **kw)
+                if diag:
+                    print(f"[Parks DIAG] launched {'chrome' if kw else 'chromium'} "
+                          f"(headful={headful})")
+                break
+            except Exception as e:
+                if diag:
+                    print(f"[Parks DIAG] launch {kw or 'chromium'} failed: {e}")
+        if browser is None:
+            print("[Parks] could not launch a browser — skipping.")
+            return ""
+
+        ctx = await browser.new_context(
+            user_agent=_UA, locale="en-US", timezone_id="America/New_York",
+            viewport={"width": 1280, "height": 900},
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"})
+        await ctx.add_init_script(_STEALTH_JS)
         page = await ctx.new_page()
         try:
             await page.goto(PARKS_URL, timeout=45000,
                             wait_until="domcontentloaded")
-            # Poll out Cloudflare: it runs a JS check then swaps in the real
-            # page. Break once the challenge text is gone and a procurement
-            # number has appeared (or we run out of tries).
-            for _ in range(10):
+            reloaded = False
+            for i in range(14):
                 try:
                     await page.wait_for_load_state("networkidle", timeout=6000)
                 except Exception:
@@ -143,6 +179,15 @@ async def _fetch_html(diag: bool = False) -> str:
                 cleared = not any(c in low for c in _CHALLENGE)
                 if cleared and (_PNUM_RE.search(body) or len(body.strip()) > 2000):
                     break
+                # One reload a few seconds in — the challenge cookie is set by
+                # then, and a fresh request with it often returns the real page.
+                if i == 2 and not reloaded:
+                    reloaded = True
+                    try:
+                        await page.reload(timeout=30000,
+                                          wait_until="domcontentloaded")
+                    except Exception:
+                        pass
                 await page.wait_for_timeout(2500)
             html = await page.content()
             if diag:

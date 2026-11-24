@@ -138,6 +138,35 @@ async def _fetch_html() -> str:
             await browser.close()
 
 
+_DOCWORD_RE = re.compile(
+    r"\.pdf|\(pdf\)|package|amendment|addendum|attachment|q\s*&\s*a|"
+    r"question|answer|exhibit|appendix|sign[\s-]?in|pre[\s-]?bid|map|"
+    r"date posted|bid due|due date|vendor question", re.I)
+_LABEL_RE = re.compile(r"^(?:ifb|rfp|rfq|rfi|op)\b", re.I)
+
+
+def _pick_title(block: str, pnum: str) -> str:
+    """Pick the human description line out of a solicitation's text block.
+    The block also holds the number, document link labels, dates and update
+    text, so we take the longest line that is NONE of those."""
+    best = ""
+    for raw in block.split("\n"):
+        t = re.sub(r"\s+", " ", raw).strip()
+        if not t or _PNUM_RE.fullmatch(t):
+            continue
+        # drop the number-only, document-label, and date/label lines
+        if _DOCWORD_RE.search(t):
+            continue
+        if _DATE_RE.search(t) and len(t) < 40:
+            continue
+        core = _PNUM_RE.sub("", t).strip(" -–:")   # strip a leading "C003761 - "
+        if len(core) < 6:
+            continue
+        if sum(ch.isalpha() for ch in core) > sum(ch.isalpha() for ch in best):
+            best = core
+    return re.sub(r"^(?:IFB|RFP|RFQ|RFI)\s+", "", best).strip()
+
+
 def _parse_html(html: str, diag: bool) -> list[dict]:
     try:
         from bs4 import BeautifulSoup
@@ -156,64 +185,63 @@ def _parse_html(html: str, diag: bool) -> list[dict]:
     today = dt.date.today()
     out, seen = [], set()
 
-    rows = soup.find_all("tr")
+    # Map each procurement number to its document PDF link (the href or the
+    # anchor text usually carries the number, e.g. .../C003761IFBPackage.pdf).
+    pdf_by_num = {}
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if ".pdf" not in href.lower():
+            continue
+        m = _PNUM_RE.search(href) or _PNUM_RE.search(a.get_text(" ", strip=True))
+        if m:
+            num = re.sub(r"\s+", "", m.group(1)).upper()
+            pdf_by_num.setdefault(num, _abs(href))
+
+    # Structure-independent: work off the visible text and split it into one
+    # block per solicitation at each NEW procurement number (table rows, divs or
+    # an accordion all flatten to the same text).
+    text = soup.get_text("\n", strip=True)
+    text = re.sub(r"\n{2,}", "\n", text)
+
+    bounds, last = [], None
+    for m in _PNUM_RE.finditer(text):
+        num = re.sub(r"\s+", "", m.group(1)).upper()
+        if num != last:
+            bounds.append((num, m.start()))
+            last = num
+
     if diag:
-        print(f"[Parks DIAG] <tr> rows found: {len(rows)}")
+        print(f"[Parks DIAG] procurement-number blocks: {len(bounds)}")
+        if not bounds:
+            print("[Parks DIAG] no numbers found — first 1500 chars of text:")
+            print(text[:1500])
 
     kept = 0
-    for tr in rows:
-        cells = tr.find_all(["td", "th"])
-        if not cells:
-            continue
-        row_text = re.sub(r"\s+", " ", tr.get_text(" ", strip=True)).strip()
-        if not row_text:
-            continue
+    for i, (pnum, start) in enumerate(bounds):
+        end = bounds[i + 1][1] if i + 1 < len(bounds) else len(text)
+        block = text[start:end]
+        low = block.lower()
 
-        pm = _PNUM_RE.search(row_text)
-        if not pm:
-            continue  # not a solicitation row
-        pnum = re.sub(r"\s+", "", pm.group(1)).upper()
-
-        low = row_text.lower()
         if any(w in low for w in ("closed", "withdrawn", "cancelled",
                                   "canceled", "awarded", "rescinded")):
             if diag:
-                print(f"[Parks DIAG] skip CLOSED {pnum}: {row_text[:80]!r}")
+                print(f"[Parks DIAG] skip CLOSED {pnum}")
             continue
 
-        # Title = the longest alphabetic cell that isn't the procurement number
-        # or a short date cell (best-effort; DIAG shows the raw row so we can pin
-        # it to a fixed column if the live table needs it).
-        title = ""
-        for c in cells:
-            t = re.sub(r"\s+", " ", c.get_text(" ", strip=True)).strip()
-            if not t or _PNUM_RE.fullmatch(t):
-                continue
-            if _DATE_RE.search(t) and len(t) < 40:
-                continue
-            if sum(ch.isalpha() for ch in t) > sum(ch.isalpha() for ch in title):
-                title = t
-        title = re.sub(r"^(?:IFB|RFP|RFQ|RFI)\s+", "", title).strip()
-        if not title:
-            title = row_text[:120]
+        title = _pick_title(block, pnum) or block.split("\n")[0][:120]
 
-        full_text = f"{pnum} {title}"
-        if not _parks_matches(full_text):
+        if not _parks_matches(f"{pnum} {title}"):
             if diag:
                 print(f"[Parks DIAG] drop junk  {pnum}: {title[:70]!r}")
             continue
 
-        due_str, due_date = _latest_date(row_text)
+        due_str, due_date = _latest_date(block)
         if due_date is not None and due_date < today:
             if diag:
-                print(f"[Parks DIAG] skip PASTDUE {pnum} ({due_str}): {title[:60]!r}")
+                print(f"[Parks DIAG] skip PASTDUE {pnum} ({due_str}): {title[:55]!r}")
             continue
 
-        url = PARKS_URL
-        for a in tr.find_all("a", href=True):
-            if ".pdf" in a["href"].lower():
-                url = _abs(a["href"])
-                break
+        url = pdf_by_num.get(pnum, PARKS_URL)
 
         key = (pnum, title.lower())
         if key in seen:

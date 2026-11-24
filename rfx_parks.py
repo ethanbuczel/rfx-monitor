@@ -111,28 +111,45 @@ def _abs(href: str) -> str:
     return "https://www.parks.ny.gov" + (href if href.startswith("/") else "/" + href)
 
 
-async def _fetch_html() -> str:
+_CHALLENGE = ("just a moment", "security verification", "verify you are human",
+              "checking your browser", "enable javascript and cookies",
+              "performing security verification")
+
+
+async def _fetch_html(diag: bool = False) -> str:
     """Load the Parks procurement page in headless Chromium and return the
-    RENDERED html. Plain requests gets a 403 here (bot-protection), so a real
-    browser is required — same approach as the Tarrytown village scraper."""
+    RENDERED html. Plain requests gets a 403, AND the page sits behind a
+    Cloudflare "Just a moment..." JS interstitial, so we must POLL until that
+    challenge clears before reading content — the exact approach that works for
+    the Tarrytown village scraper."""
     from playwright.async_api import async_playwright
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
-        ctx = await browser.new_context(user_agent=_UA)
+        ctx = await browser.new_context(user_agent=_UA, locale="en-US")
         page = await ctx.new_page()
         try:
-            await page.goto(PARKS_URL, timeout=45000)
-            try:
-                await page.wait_for_load_state("networkidle", timeout=25000)
-            except Exception:
-                pass
-            await page.wait_for_timeout(2500)  # let any challenge/table settle
-            # If a Cloudflare interstitial is up, the real table won't be present
-            # yet; give it one more beat.
+            await page.goto(PARKS_URL, timeout=45000,
+                            wait_until="domcontentloaded")
+            # Poll out Cloudflare: it runs a JS check then swaps in the real
+            # page. Break once the challenge text is gone and a procurement
+            # number has appeared (or we run out of tries).
+            for _ in range(10):
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=6000)
+                except Exception:
+                    pass
+                body = (await page.inner_text("body")) or ""
+                low = body[:600].lower()
+                cleared = not any(c in low for c in _CHALLENGE)
+                if cleared and (_PNUM_RE.search(body) or len(body.strip()) > 2000):
+                    break
+                await page.wait_for_timeout(2500)
             html = await page.content()
-            if "procurement" not in html.lower() and "C00" not in html:
-                await page.wait_for_timeout(4000)
-                html = await page.content()
+            if diag:
+                head = re.sub(r"\s+", " ", (await page.inner_text("body")))[:160]
+                print(f"[Parks DIAG] loaded {len(html)} chars; "
+                      f"cloudflare_cleared={not any(c in head.lower() for c in _CHALLENGE)}; "
+                      f"head={head!r}")
             return html
         finally:
             await browser.close()
@@ -263,12 +280,10 @@ def _parse_html(html: str, diag: bool) -> list[dict]:
 def get_parks_results() -> list[dict]:
     diag = bool(os.environ.get("DIAG"))
     try:
-        html = asyncio.run(_fetch_html())
+        html = asyncio.run(_fetch_html(diag))
     except Exception as e:
         print(f"[Parks] fetch error: {e}")
         return []
-    if diag:
-        print(f"[Parks DIAG] html length: {len(html)}")
     return _parse_html(html, diag)
 
 

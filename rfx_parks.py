@@ -246,6 +246,12 @@ _DOCWORD_RE = re.compile(
     r"\.pdf|\(pdf\)|package|amendment|addendum|attachment|q\s*&\s*a|"
     r"question|answer|exhibit|appendix|sign[\s-]?in|pre[\s-]?bid|map|"
     r"date posted|bid due|due date|vendor question", re.I)
+# Instruction / deadline sentences that sit in the same block as the title but
+# aren't it (e.g. "Bids due no later than 3:00 PM on December 30, 2026").
+_INSTRUCTION_RE = re.compile(
+    r"\b(bids?\s+(?:are\s+)?due|proposals?\s+(?:are\s+)?due|no later than|"
+    r"questions?\s+due|walk[\s-]?through|mandatory|must be (?:received|submitted)|"
+    r"\d{1,2}:\d{2}\s*(?:am|pm))", re.I)
 _LABEL_RE = re.compile(r"^(?:ifb|rfp|rfq|rfi|op)\b", re.I)
 
 
@@ -259,7 +265,7 @@ def _pick_title(block: str, pnum: str) -> str:
         if not t or _PNUM_RE.fullmatch(t):
             continue
         # drop the number-only, document-label, and date/label lines
-        if _DOCWORD_RE.search(t):
+        if _DOCWORD_RE.search(t) or _INSTRUCTION_RE.search(t):
             continue
         if _DATE_RE.search(t) and len(t) < 40:
             continue

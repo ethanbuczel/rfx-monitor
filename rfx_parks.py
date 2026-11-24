@@ -129,75 +129,114 @@ _LAUNCH_ARGS = [
 ]
 
 
-async def _fetch_html(diag: bool = False) -> str:
-    """Load the Parks procurement page and return the RENDERED html. parks.ny.gov
-    sits behind a strict Cloudflare managed challenge that 403s plain requests and
-    fingerprints vanilla headless Chromium, so we: (1) use real Chrome if present
-    (channel='chrome') — much less likely to be flagged than bundled Chromium,
-    (2) apply anti-automation stealth patches, (3) reload once mid-wait (a reload
-    with the challenge cookie set often clears it), and (4) poll until the
-    challenge text is gone. Set PARKS_HEADFUL=1 to run a visible browser, which
-    passes the challenge when headless still can't."""
-    from playwright.async_api import async_playwright
-    headful = bool(os.environ.get("PARKS_HEADFUL"))
-    async with async_playwright() as pw:
-        # Prefer real Chrome; fall back to bundled Chromium if that channel isn't
-        # installed on the runner.
-        browser = None
-        for kw in ({"channel": "chrome"}, {}):
-            try:
-                browser = await pw.chromium.launch(
-                    headless=not headful, args=_LAUNCH_ARGS, **kw)
-                if diag:
-                    print(f"[Parks DIAG] launched {'chrome' if kw else 'chromium'} "
-                          f"(headful={headful})")
-                break
-            except Exception as e:
-                if diag:
-                    print(f"[Parks DIAG] launch {kw or 'chromium'} failed: {e}")
-        if browser is None:
-            print("[Parks] could not launch a browser — skipping.")
-            return ""
-
-        ctx = await browser.new_context(
-            user_agent=_UA, locale="en-US", timezone_id="America/New_York",
-            viewport={"width": 1280, "height": 900},
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"})
-        await ctx.add_init_script(_STEALTH_JS)
-        page = await ctx.new_page()
+async def _load_page(page, diag: bool) -> str:
+    """Navigate + wait out the Cloudflare interstitial, then return rendered html."""
+    await page.goto(PARKS_URL, timeout=60000, wait_until="domcontentloaded")
+    reloaded = False
+    for i in range(16):
         try:
-            await page.goto(PARKS_URL, timeout=45000,
-                            wait_until="domcontentloaded")
-            reloaded = False
-            for i in range(14):
+            await page.wait_for_load_state("networkidle", timeout=6000)
+        except Exception:
+            pass
+        body = (await page.inner_text("body")) or ""
+        low = body[:600].lower()
+        cleared = not any(c in low for c in _CHALLENGE)
+        if cleared and (_PNUM_RE.search(body) or len(body.strip()) > 2000):
+            break
+        # One reload a few seconds in — the clearance cookie is set by then, and
+        # a fresh request carrying it often returns the real page.
+        if i == 3 and not reloaded:
+            reloaded = True
+            try:
+                await page.reload(timeout=30000, wait_until="domcontentloaded")
+            except Exception:
+                pass
+        await page.wait_for_timeout(3000)
+    html = await page.content()
+    if diag:
+        head = re.sub(r"\s+", " ", (await page.inner_text("body")))[:160]
+        print(f"[Parks DIAG] loaded {len(html)} chars; "
+              f"cloudflare_cleared={not any(c in head.lower() for c in _CHALLENGE)}; "
+              f"head={head!r}")
+    return html
+
+
+async def _fetch_html(diag: bool = False) -> str:
+    """Load the Parks procurement page and return the RENDERED html.
+
+    parks.ny.gov runs a strict Cloudflare MANAGED challenge that 403s plain
+    requests and — crucially — detects the AUTOMATION ITSELF (the CDP
+    'Runtime.enable' leak), so vanilla Playwright fails even headful with real
+    Chrome. We therefore drive the browser with PATCHRIGHT, a drop-in Playwright
+    that removes those automation leaks and is purpose-built to pass exactly this
+    challenge, using real Chrome + a persistent profile (which also keeps the
+    cf_clearance cookie between runs). Falls back to plain Playwright if
+    patchright isn't installed. Headful by default; PARKS_HEADLESS=1 forces
+    headless."""
+    headful = not bool(os.environ.get("PARKS_HEADLESS"))
+    try:
+        from patchright.async_api import async_playwright as _ap
+        engine = "patchright"
+    except Exception:
+        from playwright.async_api import async_playwright as _ap
+        engine = "playwright"
+    if diag:
+        print(f"[Parks DIAG] engine={engine} headful={headful}")
+
+    import tempfile
+    import pathlib
+    profile = str(pathlib.Path(tempfile.gettempdir()) / "pw_parks_profile")
+
+    async with _ap() as pw:
+        if engine == "patchright":
+            # patchright's recommended config: real Chrome + persistent context,
+            # NO extra args / init scripts (those re-introduce detectable leaks —
+            # patchright manages stealth itself).
+            ctx = None
+            for kw in ({"channel": "chrome"}, {}):
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=6000)
+                    ctx = await pw.chromium.launch_persistent_context(
+                        profile, headless=not headful, user_agent=_UA,
+                        locale="en-US", timezone_id="America/New_York",
+                        viewport={"width": 1280, "height": 900}, **kw)
+                    if diag:
+                        print(f"[Parks DIAG] launched {'chrome' if kw else 'chromium'}")
+                    break
+                except Exception as e:
+                    if diag:
+                        print(f"[Parks DIAG] launch {kw or 'chromium'} failed: {e}")
+            if ctx is None:
+                print("[Parks] could not launch patchright browser — skipping.")
+                return ""
+            try:
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                return await _load_page(page, diag)
+            finally:
+                await ctx.close()
+        else:
+            # Fallback: plain Playwright with stealth patches (unlikely to clear
+            # this particular challenge, but harmless if patchright is missing).
+            browser = None
+            for kw in ({"channel": "chrome"}, {}):
+                try:
+                    browser = await pw.chromium.launch(
+                        headless=not headful, args=_LAUNCH_ARGS, **kw)
+                    break
                 except Exception:
                     pass
-                body = (await page.inner_text("body")) or ""
-                low = body[:600].lower()
-                cleared = not any(c in low for c in _CHALLENGE)
-                if cleared and (_PNUM_RE.search(body) or len(body.strip()) > 2000):
-                    break
-                # One reload a few seconds in — the challenge cookie is set by
-                # then, and a fresh request with it often returns the real page.
-                if i == 2 and not reloaded:
-                    reloaded = True
-                    try:
-                        await page.reload(timeout=30000,
-                                          wait_until="domcontentloaded")
-                    except Exception:
-                        pass
-                await page.wait_for_timeout(2500)
-            html = await page.content()
-            if diag:
-                head = re.sub(r"\s+", " ", (await page.inner_text("body")))[:160]
-                print(f"[Parks DIAG] loaded {len(html)} chars; "
-                      f"cloudflare_cleared={not any(c in head.lower() for c in _CHALLENGE)}; "
-                      f"head={head!r}")
-            return html
-        finally:
-            await browser.close()
+            if browser is None:
+                print("[Parks] could not launch a browser — skipping.")
+                return ""
+            ctx = await browser.new_context(
+                user_agent=_UA, locale="en-US", timezone_id="America/New_York",
+                viewport={"width": 1280, "height": 900},
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"})
+            await ctx.add_init_script(_STEALTH_JS)
+            page = await ctx.new_page()
+            try:
+                return await _load_page(page, diag)
+            finally:
+                await browser.close()
 
 
 _DOCWORD_RE = re.compile(

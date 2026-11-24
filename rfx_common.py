@@ -64,6 +64,12 @@ PHRASE_KEYWORDS = [
     "runway", "taxiway", "airfield", "landside",
     # -- Federal programs that show up verbatim in titles --
     "reconnecting communities", "transportation alternatives",
+    # -- Environmental-planning catch. "conservation plan" is narrow and catches
+    #    NYS Parks ecological/HCP jobs (e.g. the Long Island Piping Plover Habitat
+    #    Conservation Plan). NOTE: bare "consultant" is deliberately NOT here —
+    #    too broad for every source — so it lives only in the Parks scraper's own
+    #    matcher (rfx_parks._parks_matches) instead. --
+    "conservation plan",
 ]
 
 # Short ALL-CAPS acronyms — matched on word boundaries so we don't hit, e.g.,

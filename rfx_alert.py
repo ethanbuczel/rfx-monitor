@@ -846,6 +846,15 @@ def main() -> None:
     except Exception as e:
         print(f"[nyc portals] module error (continuing without it): {e}")
 
+    # NYS Parks (OPRHP) consultant/service solicitations — the Cxxxxxx jobs that
+    # live ONLY on the Parks procurement page (never on the Contract Reporter).
+    # Permissive by design; the classifier does relevance + far-from-region.
+    try:
+        from rfx_parks import get_parks_results
+        all_results += get_parks_results()
+    except Exception as e:
+        print(f"[parks] module error (continuing without it): {e}")
+
     # Final dedup by (title, url).
     seen, deduped = set(), []
     for r in all_results:

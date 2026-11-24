@@ -192,15 +192,18 @@ async def _fetch_html(diag: bool = False) -> str:
             # patchright's recommended config: real Chrome + persistent context,
             # NO extra args / init scripts (those re-introduce detectable leaks —
             # patchright manages stealth itself).
+            # IMPORTANT: override NOTHING here — no user_agent, viewport, locale
+            # or timezone. Forcing a UA string on top of real Chrome creates a
+            # fingerprint mismatch (UA vs client-hints/TLS) that Cloudflare flags
+            # instantly, which is exactly what defeated the earlier attempts.
+            # patchright + native real Chrome is the configuration that passes.
             ctx = None
             for kw in ({"channel": "chrome"}, {}):
                 try:
                     ctx = await pw.chromium.launch_persistent_context(
-                        profile, headless=not headful, user_agent=_UA,
-                        locale="en-US", timezone_id="America/New_York",
-                        viewport={"width": 1280, "height": 900}, **kw)
+                        profile, headless=not headful, no_viewport=True, **kw)
                     if diag:
-                        print(f"[Parks DIAG] launched {'chrome' if kw else 'chromium'}")
+                        print(f"[Parks DIAG] launched {'chrome' if kw else 'chromium'} (native fingerprint)")
                     break
                 except Exception as e:
                     if diag:
